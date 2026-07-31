@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod filter;
 mod meta;
+mod pathutil;
 mod query;
 mod scan;
 mod workspace;

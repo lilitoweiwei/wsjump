@@ -3,7 +3,7 @@
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::{filter, query, scan};
+use crate::{filter, pathutil, query, scan};
 
 /// Run the `top` subcommand. `args` is the query token list (may be empty,
 /// meaning "match everything").
@@ -14,7 +14,7 @@ pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
 
     match matches.first() {
         Some(ws) => {
-            println!("{}", ws.path.display());
+            println!("{}", pathutil::display(&ws.path));
             Ok(())
         }
         None => Err(AppError::runtime(format!(
