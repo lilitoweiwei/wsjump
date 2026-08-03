@@ -1,9 +1,9 @@
 //! `wsjump top <query...>`: print the absolute path of the first matching
 //! workspace (lexicographic by id).
 
-use crate::config::Config;
-use crate::error::{AppError, AppResult};
-use crate::{filter, query, scan};
+use wsjump_core::config::Config;
+use wsjump_core::error::{AppError, AppResult};
+use wsjump_core::{filter, query, scan};
 
 /// Run the `top` subcommand. `args` is the query token list (may be empty,
 /// meaning "match everything").

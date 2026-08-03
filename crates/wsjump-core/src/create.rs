@@ -1,21 +1,22 @@
-//! `wsjump new <slug...>`: create a new workspace directory named
-//! `YYYYMMDD[-slug]` under `w/` and print its absolute path.
+//! Creating a new workspace directory under `w/`.
 
 use std::fs;
+use std::path::PathBuf;
 
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 
-/// Run the `new` subcommand.
+/// Create a new workspace directory named `YYYYMMDD[-slug]` under the
+/// configured `workspaces_dir` and return its absolute path.
 ///
-/// - All positional args are joined with '-' to form the slug (empty if none).
+/// - `slug` is used verbatim (callers join positional args as needed); an
+///   empty slug yields a bare `YYYYMMDD` directory.
 /// - The current date (in the configured UTC offset) is always prefixed;
 ///   no dedup / validation of the slug is performed.
 /// - An existing target directory is a conflict and aborts without overwrite.
-pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
-    let slug = args.join("-");
+pub fn create_workspace(config: &Config, slug: &str) -> AppResult<PathBuf> {
     let date_prefix = today_prefix(config.utc_offset_hours)?;
 
     // Empty slug -> "YYYYMMDD"; non-empty -> "YYYYMMDD-slug".
@@ -41,8 +42,7 @@ pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
         ))
     })?;
 
-    println!("{}", target.display());
-    Ok(())
+    Ok(target)
 }
 
 /// Compute today's date as "YYYYMMDD" in the given fixed UTC offset (hours).

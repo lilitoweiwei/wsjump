@@ -1,8 +1,8 @@
 //! `wsjump ls <query...>`: print one absolute path per matching workspace.
 
-use crate::config::Config;
-use crate::error::AppResult;
-use crate::{filter, query, scan};
+use wsjump_core::config::Config;
+use wsjump_core::error::AppResult;
+use wsjump_core::{filter, query, scan};
 
 /// Run the `ls` subcommand. An empty query lists all workspaces; an empty
 /// result set is normal and exits successfully with no output.

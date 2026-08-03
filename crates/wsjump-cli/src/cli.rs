@@ -1,6 +1,6 @@
 //! Argv parsing: identify the subcommand and its arguments.
 
-use crate::error::{AppError, AppResult};
+use wsjump_core::error::{AppError, AppResult};
 
 /// A parsed command line: which subcommand to run, with its trailing args.
 pub enum Command {

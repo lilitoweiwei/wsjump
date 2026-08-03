@@ -1,6 +1,7 @@
 //! wsjump-core: all business logic shared by the CLI and TUI front-ends.
 
 pub mod config;
+pub mod create;
 pub mod error;
 pub mod filter;
 pub mod meta;

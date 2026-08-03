@@ -1,6 +1,6 @@
 //! `wsjump help` / `wsjump` (no args): print usage.
 
-use crate::error::AppResult;
+use wsjump_core::error::AppResult;
 
 /// Usage text listing every subcommand with a one-line description.
 const USAGE: &str = "\
