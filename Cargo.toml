@@ -1,13 +1,6 @@
-[package]
-name = "wsjump"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "wsjump"
-path = "src/main.rs"
-
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-time = "0.3"
+[workspace]
+resolver = "2"
+members = [
+    "crates/wsjump-core",
+    "crates/wsjump-cli",
+]
