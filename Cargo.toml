@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "crates/wsjump-core",
     "crates/wsjump-cli",
+    "crates/wsjump-tui",
 ]

@@ -1,0 +1,14 @@
+[package]
+name = "wsjump-tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wsjump-tui"
+path = "src/main.rs"
+
+[dependencies]
+wsjump-core = { path = "../wsjump-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+tui-input = "0.11"
