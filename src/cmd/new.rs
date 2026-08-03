@@ -7,7 +7,6 @@ use time::{OffsetDateTime, UtcOffset};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::pathutil;
 
 /// Run the `new` subcommand.
 ///
@@ -30,19 +29,19 @@ pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
     if target.exists() {
         return Err(AppError::runtime(format!(
             "workspace already exists: {}",
-            pathutil::display(&target)
+            target.display()
         )));
     }
 
     fs::create_dir(&target).map_err(|e| {
         AppError::runtime(format!(
             "cannot create workspace '{}': {}",
-            pathutil::display(&target),
+            target.display(),
             e
         ))
     })?;
 
-    println!("{}", pathutil::display(&target));
+    println!("{}", target.display());
     Ok(())
 }
 
