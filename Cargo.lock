@@ -192,7 +192,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "wsjump"
+name = "wsjump-cli"
+version = "0.1.0"
+dependencies = [
+ "wsjump-core",
+]
+
+[[package]]
+name = "wsjump-core"
 version = "0.1.0"
 dependencies = [
  "serde",
