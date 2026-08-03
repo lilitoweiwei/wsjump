@@ -36,9 +36,22 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.set_cursor_position(Position::new(x, area.y));
 }
 
-/// Draw the candidate list, highlighting the selected row.
+/// Draw the candidate list, highlighting the selected row. When there are no
+/// matches, show a hint instead.
 fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app.matched().map(|ws| ListItem::new(item_line(ws))).collect();
+    if app.match_count() == 0 {
+        frame.render_widget(
+            Paragraph::new("no matching workspace").style(Style::default().add_modifier(Modifier::DIM)),
+            area,
+        );
+        return;
+    }
+
+    let hscroll = app.hscroll();
+    let items: Vec<ListItem> = app
+        .matched()
+        .map(|ws| ListItem::new(item_line(ws, hscroll)))
+        .collect();
 
     let list = List::new(items).highlight_style(
         Style::default()
@@ -47,15 +60,14 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let mut state = ListState::default();
-    if app.match_count() > 0 {
-        state.select(Some(app.selected()));
-    }
+    state.select(Some(app.selected()));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// Build a single-line display for one workspace: id + tags + desc.
-fn item_line(ws: &Workspace) -> Line<'static> {
-    let mut spans = vec![Span::raw(ws.id.clone())];
+/// Build a single-line display for one workspace: id + tags + desc, shifted
+/// left by `hscroll` characters so truncated content can be revealed.
+fn item_line(ws: &Workspace, hscroll: usize) -> Line<'static> {
+    let mut text = ws.id.clone();
     if !ws.tags.is_empty() {
         let tags = ws
             .tags
@@ -63,14 +75,17 @@ fn item_line(ws: &Workspace) -> Line<'static> {
             .map(|t| format!(":{}", t))
             .collect::<Vec<_>>()
             .join(" ");
-        spans.push(Span::raw(format!("  {}", tags)));
+        text.push_str(&format!("  {}", tags));
     }
     let desc = ws.desc.replace('\n', " ");
     let desc = desc.trim();
     if !desc.is_empty() {
-        spans.push(Span::raw(format!("  {}", desc)));
+        text.push_str(&format!("  {}", desc));
     }
-    Line::from(spans)
+
+    // Apply horizontal scroll by dropping the first `hscroll` characters.
+    let shifted: String = text.chars().skip(hscroll).collect();
+    Line::from(Span::raw(shifted))
 }
 
 /// Draw the bottom status / help line.
@@ -80,6 +95,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         format!("{}/{}", app.selected() + 1, app.match_count())
     };
-    let text = format!("{}   up/down move   enter jump   esc quit", position);
+    let text = format!(
+        "{}   up/down move   shift+left/right scroll   enter jump   esc quit",
+        position
+    );
     frame.render_widget(Paragraph::new(text).style(Style::default()), area);
 }

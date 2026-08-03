@@ -5,6 +5,9 @@ use tui_input::Input;
 use wsjump_core::workspace::Workspace;
 use wsjump_core::{filter, query};
 
+/// Number of characters to shift per horizontal scroll step.
+const HSCROLL_STEP: usize = 8;
+
 /// Holds all interactive state for the picker: the full workspace list, the
 /// query input, the indices of currently matching workspaces, and which match
 /// is selected.
@@ -17,6 +20,9 @@ pub struct App {
     matches: Vec<usize>,
     /// Index into `matches` of the highlighted row (not into `workspaces`).
     selected: usize,
+    /// Horizontal scroll offset (in characters) applied to list rows so the
+    /// user can reveal content truncated on the right.
+    hscroll: usize,
 }
 
 impl App {
@@ -28,6 +34,7 @@ impl App {
             input: Input::default(),
             matches,
             selected: 0,
+            hscroll: 0,
         }
     }
 
@@ -52,6 +59,7 @@ impl App {
         let tokens = query::parse_str(self.input.value());
         self.matches = filter::filter_indices(&self.workspaces, &tokens);
         self.selected = 0;
+        self.hscroll = 0;
     }
 
     /// The workspaces currently matching, in display order.
@@ -84,6 +92,21 @@ impl App {
         if self.selected > 0 {
             self.selected -= 1;
         }
+    }
+
+    /// Current horizontal scroll offset (in characters).
+    pub fn hscroll(&self) -> usize {
+        self.hscroll
+    }
+
+    /// Scroll list content left (toward the beginning), clamped at 0.
+    pub fn scroll_left(&mut self) {
+        self.hscroll = self.hscroll.saturating_sub(HSCROLL_STEP);
+    }
+
+    /// Scroll list content right (reveal truncated content).
+    pub fn scroll_right(&mut self) {
+        self.hscroll += HSCROLL_STEP;
     }
 
     /// The absolute path of the currently selected workspace, if any.

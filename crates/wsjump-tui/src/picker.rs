@@ -94,6 +94,7 @@ fn event_loop(
 /// end, `None` to keep looping.
 fn handle_key(app: &mut App, key: KeyEvent) -> AppResult<Option<Outcome>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Esc => Ok(Some(Outcome::Aborted)),
         KeyCode::Char('c') if ctrl => Ok(Some(Outcome::Aborted)),
@@ -108,6 +109,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppResult<Option<Outcome>> {
         }
         KeyCode::Down => {
             app.select_next();
+            Ok(None)
+        }
+        // Shift+Left/Right scroll the list horizontally to reveal truncated
+        // content; plain Left/Right fall through to the input cursor.
+        KeyCode::Left if shift => {
+            app.scroll_left();
+            Ok(None)
+        }
+        KeyCode::Right if shift => {
+            app.scroll_right();
             Ok(None)
         }
         // Everything else is fed to the input box; re-filter afterwards.
