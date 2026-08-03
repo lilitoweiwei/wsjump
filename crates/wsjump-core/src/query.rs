@@ -21,3 +21,11 @@ pub fn parse(args: &[String]) -> Vec<Token> {
         })
         .collect()
 }
+
+/// Parse a single raw query string by splitting on whitespace, then applying
+/// the same token rules as [`parse`]. Used by interactive front-ends where the
+/// query is one edited string rather than pre-split argv.
+pub fn parse_str(input: &str) -> Vec<Token> {
+    let args: Vec<String> = input.split_whitespace().map(str::to_string).collect();
+    parse(&args)
+}

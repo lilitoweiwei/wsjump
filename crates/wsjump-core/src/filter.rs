@@ -16,6 +16,18 @@ pub fn filter<'a>(workspaces: &'a [Workspace], tokens: &[Token]) -> Vec<&'a Work
         .collect()
 }
 
+/// Like [`filter`], but returns the indices of matching workspaces instead of
+/// references. Useful for UIs that own the workspace list and track selection
+/// by index. Uses the same matching rules.
+pub fn filter_indices(workspaces: &[Workspace], tokens: &[Token]) -> Vec<usize> {
+    workspaces
+        .iter()
+        .enumerate()
+        .filter(|(_, ws)| tokens.iter().all(|token| matches_token(ws, token)))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Does a single token match the workspace?
 fn matches_token(ws: &Workspace, token: &Token) -> bool {
     match token {

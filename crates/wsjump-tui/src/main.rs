@@ -4,9 +4,11 @@
 //! absolute path is written to stdout (the UI is drawn to stderr) so a shell
 //! function can `Set-Location` to it. `init` prints the integration snippet.
 
+mod app;
 mod cli;
 mod init;
 mod picker;
+mod render;
 
 use std::process::ExitCode;
 
