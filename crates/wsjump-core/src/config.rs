@@ -1,9 +1,11 @@
 //! Configuration file location and parsing.
 //!
-//! `wsjump` reads a TOML config placed next to the executable (resolved via
-//! `current_exe()`, which follows symlinks / junctions to the real binary in
-//! `target/<profile>/`). The config tells the tool where `w/` lives and which
-//! fixed UTC offset to use for date generation / parsing.
+//! `wsjump` reads a TOML config placed next to the executable. The path is
+//! resolved via `current_exe()`, which on Windows returns the invoked path
+//! (e.g. the symlink in `bin/`) WITHOUT resolving symlinks / junctions to the
+//! real binary in `target/<profile>/`. The config therefore lives next to the
+//! invoked binary in `bin/`. It tells the tool where `w/` lives and which fixed
+//! UTC offset to use for date generation / parsing.
 
 use std::fs;
 use std::path::PathBuf;
