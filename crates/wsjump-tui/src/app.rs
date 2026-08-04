@@ -57,7 +57,13 @@ impl App {
     /// Call after any change to the input.
     pub fn refilter(&mut self) {
         let tokens = query::parse_str(self.input.value());
-        self.matches = filter::filter_indices(&self.workspaces, &tokens);
+        self.matches = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| filter::matches_all(ws, &tokens))
+            .map(|(i, _)| i)
+            .collect();
         self.selected = 0;
         self.hscroll = 0;
     }
