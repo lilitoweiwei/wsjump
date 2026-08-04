@@ -5,6 +5,7 @@ pub mod create;
 pub mod db;
 pub mod error;
 pub mod filter;
+pub mod index;
 pub mod meta;
 pub mod query;
 pub mod scan;

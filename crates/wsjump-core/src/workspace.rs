@@ -7,6 +7,7 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use crate::error::{AppError, AppResult};
 
 /// A single workspace, either discovered on disk or read back from the database.
+#[derive(Clone)]
 pub struct Workspace {
     /// The whole directory name, e.g. "20260730-wsjump".
     pub id: String,

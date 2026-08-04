@@ -37,6 +37,23 @@ pub struct Cursor {
     id: String,
 }
 
+impl Cursor {
+    /// The cursor identifying a workspace as a resume point.
+    pub fn for_workspace(ws: &Workspace) -> Cursor {
+        Cursor {
+            // Workspaces read back from the database always carry a value, since
+            // the column is NOT NULL.
+            last_access: ws.last_access.unwrap_or_default(),
+            id: ws.id.clone(),
+        }
+    }
+
+    /// The id of the last row already returned.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 /// One page of query results.
 pub struct Page {
     /// The matching workspaces, in the requested order.
@@ -304,7 +321,7 @@ impl Db {
         // hand back a cursor pointing at the last row we actually return.
         let next = if workspaces.len() > limit {
             workspaces.truncate(limit);
-            workspaces.last().map(cursor_for)
+            workspaces.last().map(Cursor::for_workspace)
         } else {
             None
         };
@@ -339,15 +356,6 @@ fn order_by(sort: SortOrder) -> &'static str {
     match sort {
         SortOrder::Recency => "last_access DESC, id DESC",
         SortOrder::Id => "id ASC",
-    }
-}
-
-/// The cursor identifying a row as a resume point.
-fn cursor_for(ws: &Workspace) -> Cursor {
-    Cursor {
-        // Rows always come from the database, where the column is NOT NULL.
-        last_access: ws.last_access.unwrap_or_default(),
-        id: ws.id.clone(),
     }
 }
 
