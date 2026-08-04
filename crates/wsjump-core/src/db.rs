@@ -9,16 +9,48 @@
 //! deleted, the next sync recreates the index, though access history is lost and
 //! every workspace falls back to its creation date.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OpenFlags, Transaction};
+use rusqlite::types::ToSql;
+use rusqlite::{params, Connection, OpenFlags, Row, Transaction};
 use time::UtcOffset;
 
 use crate::error::{AppError, AppResult};
-use crate::workspace::{format_date, Workspace};
+use crate::query::{SortOrder, Token};
+use crate::workspace::{format_date, parse_date, split_tags, Workspace};
 
 /// Schema version this build expects, stored in SQLite's `user_version`.
 const SCHEMA_VERSION: i32 = 1;
+
+/// Position of the last row of a page, used to resume the query after it.
+///
+/// Paging seeks by sort key rather than counting rows: `LIMIT n OFFSET x` makes
+/// SQLite walk and discard `x` rows first, so the cost of a page grows with how
+/// deep into the results it is. Comparing against the sort key instead lets the
+/// index jump straight to the resume point, making a page cost depend only on
+/// its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor {
+    /// `last_access` of the last row already returned.
+    last_access: i64,
+    /// `id` of the last row already returned; breaks ties.
+    id: String,
+}
+
+/// One page of query results.
+pub struct Page {
+    /// The matching workspaces, in the requested order.
+    pub workspaces: Vec<Workspace>,
+    /// Cursor to pass back for the next page, or `None` at the end of results.
+    pub next: Option<Cursor>,
+}
+
+impl Page {
+    /// Whether more results exist after this page.
+    pub fn has_more(&self) -> bool {
+        self.next.is_some()
+    }
+}
 
 /// An open connection to the wsjump database.
 pub struct Db {
@@ -177,10 +209,180 @@ impl Db {
         tx.commit()
             .map_err(|e| sql_err("cannot commit sync transaction", e))
     }
+
+    /// Fetch one page of workspaces matching `tokens`, ordered by `sort`.
+    ///
+    /// `limit` is how many rows the caller wants; one extra is fetched
+    /// internally to learn whether more exist, so no separate COUNT is needed.
+    /// Pass `after: None` for the first page, then the previous page's `next`.
+    ///
+    /// Matching is case-insensitive substring, against `slug` and `tags` only.
+    /// `desc` is excluded because it can be arbitrarily long and would dominate
+    /// the scan; searching it belongs to the future slow query.
+    pub fn query(
+        &self,
+        tokens: &[Token],
+        sort: SortOrder,
+        limit: usize,
+        after: Option<&Cursor>,
+    ) -> AppResult<Page> {
+        let mut conditions: Vec<String> = Vec::new();
+        // Values are always bound, never interpolated: only the shape of the SQL
+        // varies with the query, never its data.
+        let mut binds: Vec<Box<dyn ToSql>> = Vec::new();
+
+        for token in tokens {
+            let (column_clause, needle) = match token {
+                // A ':'-prefixed token deliberately narrows to tags only.
+                Token::Tag(needle) => ("lower(tags) LIKE ? ESCAPE '\\'", needle),
+                Token::Text(needle) => (
+                    "(lower(slug) LIKE ? ESCAPE '\\' OR lower(tags) LIKE ? ESCAPE '\\')",
+                    needle,
+                ),
+            };
+            let pattern = like_pattern(needle);
+            // The text form mentions the pattern twice, so bind it twice.
+            let placeholders = column_clause.matches('?').count();
+            for _ in 0..placeholders {
+                binds.push(Box::new(pattern.clone()));
+            }
+            conditions.push(column_clause.to_string());
+        }
+
+        if let Some(cursor) = after {
+            match sort {
+                SortOrder::Recency => {
+                    // Row-value comparison walks the (last_access DESC, id DESC)
+                    // index directly from the resume point.
+                    conditions.push("(last_access, id) < (?, ?)".to_string());
+                    binds.push(Box::new(cursor.last_access));
+                    binds.push(Box::new(cursor.id.clone()));
+                }
+                SortOrder::Id => {
+                    conditions.push("id > ?".to_string());
+                    binds.push(Box::new(cursor.id.clone()));
+                }
+            }
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, date, slug, tags, desc, path, last_access
+             FROM workspace
+             {}
+             ORDER BY {}
+             LIMIT ?",
+            where_clause,
+            order_by(sort),
+        );
+        // Over-fetch by one row purely as a "more exist" probe; it is never shown.
+        binds.push(Box::new(limit as i64 + 1));
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| sql_err("cannot prepare workspace query", e))?;
+        let bind_refs: Vec<&dyn ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let mut rows = stmt
+            .query(bind_refs.as_slice())
+            .map_err(|e| sql_err("cannot run workspace query", e))?;
+
+        let mut workspaces = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| sql_err("cannot read workspace row", e))?
+        {
+            workspaces.push(read_workspace(row)?);
+        }
+
+        // Presence of the probe row means there is a further page; drop it and
+        // hand back a cursor pointing at the last row we actually return.
+        let next = if workspaces.len() > limit {
+            workspaces.truncate(limit);
+            workspaces.last().map(cursor_for)
+        } else {
+            None
+        };
+
+        Ok(Page { workspaces, next })
+    }
 }
 
-/// Delete rows whose workspace is no longer on disk.
+/// The ORDER BY clause for a sort order.
 ///
+/// Both orders end in `id`, making them total: without a tiebreak, rows sharing
+/// a `last_access` (every workspace created on the same day starts out that way)
+/// could be returned in any order, and a keyset cursor could then skip or repeat
+/// rows across pages.
+fn order_by(sort: SortOrder) -> &'static str {
+    match sort {
+        SortOrder::Recency => "last_access DESC, id DESC",
+        SortOrder::Id => "id ASC",
+    }
+}
+
+/// The cursor identifying a row as a resume point.
+fn cursor_for(ws: &Workspace) -> Cursor {
+    Cursor {
+        // Rows always come from the database, where the column is NOT NULL.
+        last_access: ws.last_access.unwrap_or_default(),
+        id: ws.id.clone(),
+    }
+}
+
+/// Build a case-insensitive "contains" LIKE pattern for `needle`.
+///
+/// `%` and `_` are wildcards in LIKE, and `\` is our declared escape character,
+/// so all three must be escaped for the needle to be matched literally;
+/// otherwise typing `_` would silently match any character.
+fn like_pattern(needle: &str) -> String {
+    let mut pattern = String::with_capacity(needle.len() + 2);
+    pattern.push('%');
+    for ch in needle.to_lowercase().chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
+/// Rebuild a `Workspace` from a result row.
+fn read_workspace(row: &Row<'_>) -> AppResult<Workspace> {
+    let id: String = row.get(0).map_err(|e| sql_err("cannot read id", e))?;
+    let date_text: String = row.get(1).map_err(|e| sql_err("cannot read date", e))?;
+    let date = parse_date(&date_text).ok_or_else(|| {
+        AppError::runtime(format!(
+            "workspace '{}' has an invalid stored date '{}'",
+            id, date_text
+        ))
+    })?;
+    let slug: String = row.get(2).map_err(|e| sql_err("cannot read slug", e))?;
+    let tags: String = row.get(3).map_err(|e| sql_err("cannot read tags", e))?;
+    let desc: String = row.get(4).map_err(|e| sql_err("cannot read desc", e))?;
+    let path: String = row.get(5).map_err(|e| sql_err("cannot read path", e))?;
+    let last_access: i64 = row
+        .get(6)
+        .map_err(|e| sql_err("cannot read last_access", e))?;
+
+    Ok(Workspace {
+        id,
+        date,
+        slug,
+        path: PathBuf::from(path),
+        tags: split_tags(&tags),
+        desc,
+        last_access: Some(last_access),
+    })
+}
+
+/// Delete rows whose workspace is no longer on disk.///
 /// The ids present on disk go into a temporary table rather than a giant
 /// `NOT IN (?, ?, ...)` list, which would grow the SQL with the number of
 /// workspaces and can exceed SQLite's parameter limit.
@@ -376,5 +578,294 @@ mod tests {
         db.sync(&[workspace("alpha", &[])], offset()).unwrap();
         db.sync(&[workspace("alpha", &[])], offset()).unwrap();
         assert_eq!(stored_ids(&db).len(), 1);
+    }
+
+    /// Set a row's access time, standing in for a recorded visit.
+    fn set_last_access(db: &Db, id: &str, ts: i64) {
+        let n = db
+            .conn
+            .execute(
+                "UPDATE workspace SET last_access = ?1 WHERE id = ?2",
+                params![ts, id],
+            )
+            .unwrap();
+        assert_eq!(n, 1, "expected to update exactly one row for '{}'", id);
+    }
+
+    /// Run a query and return the resulting ids in order.
+    fn query_ids(db: &Db, query: &str, sort: SortOrder, limit: usize) -> Vec<String> {
+        let tokens = crate::query::parse_str(query);
+        let page = db.query(&tokens, sort, limit, None).unwrap();
+        page.workspaces.into_iter().map(|ws| ws.id).collect()
+    }
+
+    #[test]
+    fn empty_query_matches_everything() {
+        let mut db = memory_db();
+        db.sync(
+            &[workspace("alpha", &[]), workspace("beta", &[])],
+            offset(),
+        )
+        .unwrap();
+        assert_eq!(query_ids(&db, "", SortOrder::Id, 10).len(), 2);
+    }
+
+    #[test]
+    fn text_token_matches_slug_substring_anywhere() {
+        let mut db = memory_db();
+        db.sync(&[workspace("wsjump", &[])], offset()).unwrap();
+        // Matching is "contains", not "starts with".
+        assert_eq!(query_ids(&db, "jump", SortOrder::Id, 10).len(), 1);
+        assert_eq!(query_ids(&db, "wsj", SortOrder::Id, 10).len(), 1);
+        // But it is a substring, not a subsequence: that is the slow query's job.
+        assert!(query_ids(&db, "wj", SortOrder::Id, 10).is_empty());
+    }
+
+    #[test]
+    fn matching_ignores_case() {
+        let mut db = memory_db();
+        db.sync(&[workspace("WsJump", &["Tool"])], offset()).unwrap();
+        assert_eq!(query_ids(&db, "wsjump", SortOrder::Id, 10).len(), 1);
+        assert_eq!(query_ids(&db, ":tool", SortOrder::Id, 10).len(), 1);
+    }
+
+    #[test]
+    fn text_token_matches_tags_too() {
+        let mut db = memory_db();
+        db.sync(&[workspace("alpha", &["rust"])], offset()).unwrap();
+        assert_eq!(query_ids(&db, "rust", SortOrder::Id, 10).len(), 1);
+    }
+
+    #[test]
+    fn text_token_does_not_match_desc() {
+        let mut db = memory_db();
+        let mut ws = workspace("alpha", &[]);
+        ws.desc = "a note about databases".to_string();
+        db.sync(&[ws], offset()).unwrap();
+        // desc is excluded from the fast query by design.
+        assert!(query_ids(&db, "databases", SortOrder::Id, 10).is_empty());
+    }
+
+    #[test]
+    fn text_token_does_not_match_the_date_prefix() {
+        let mut db = memory_db();
+        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        // Only slug and tags are searched, so the user never has to type a date.
+        assert!(query_ids(&db, "20260730", SortOrder::Id, 10).is_empty());
+    }
+
+    #[test]
+    fn tag_token_searches_tags_only() {
+        let mut db = memory_db();
+        db.sync(
+            &[workspace("rust", &[]), workspace("alpha", &["rust"])],
+            offset(),
+        )
+        .unwrap();
+        // ':rust' must ignore the workspace whose *slug* is "rust".
+        assert_eq!(
+            query_ids(&db, ":rust", SortOrder::Id, 10),
+            vec!["20260730-alpha".to_string()]
+        );
+    }
+
+    #[test]
+    fn multiple_tokens_combine_with_and() {
+        let mut db = memory_db();
+        db.sync(
+            &[
+                workspace("alpha", &["rust", "tool"]),
+                workspace("beta", &["rust"]),
+            ],
+            offset(),
+        )
+        .unwrap();
+        assert_eq!(
+            query_ids(&db, ":rust :tool", SortOrder::Id, 10),
+            vec!["20260730-alpha".to_string()]
+        );
+    }
+
+    #[test]
+    fn wildcard_characters_are_matched_literally() {
+        let mut db = memory_db();
+        db.sync(
+            &[workspace("plain", &[]), workspace("a_b", &[])],
+            offset(),
+        )
+        .unwrap();
+        // Unescaped, '_' is a LIKE wildcard and would also match "plain".
+        assert_eq!(
+            query_ids(&db, "a_b", SortOrder::Id, 10),
+            vec!["20260730-a_b".to_string()]
+        );
+        // '%' likewise must not act as a wildcard.
+        assert!(query_ids(&db, "%", SortOrder::Id, 10).is_empty());
+    }
+
+    #[test]
+    fn quotes_in_a_query_are_data_not_sql() {
+        let mut db = memory_db();
+        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        // Values are bound, so this is a harmless (non-matching) needle rather
+        // than syntax; the row must also survive.
+        assert!(query_ids(&db, "'; DROP TABLE workspace; --", SortOrder::Id, 10).is_empty());
+        assert_eq!(stored_ids(&db).len(), 1);
+    }
+
+    #[test]
+    fn recency_order_puts_the_most_recent_first() {
+        let mut db = memory_db();
+        db.sync(
+            &[
+                workspace("alpha", &[]),
+                workspace("beta", &[]),
+                workspace("gamma", &[]),
+            ],
+            offset(),
+        )
+        .unwrap();
+        set_last_access(&db, "20260730-alpha", 3_000);
+        set_last_access(&db, "20260730-beta", 1_000);
+        set_last_access(&db, "20260730-gamma", 2_000);
+
+        assert_eq!(
+            query_ids(&db, "", SortOrder::Recency, 10),
+            vec![
+                "20260730-alpha".to_string(),
+                "20260730-gamma".to_string(),
+                "20260730-beta".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn id_order_is_lexicographic() {
+        let mut db = memory_db();
+        db.sync(
+            &[workspace("gamma", &[]), workspace("alpha", &[])],
+            offset(),
+        )
+        .unwrap();
+        set_last_access(&db, "20260730-gamma", 9_000);
+
+        // Explicit id order must ignore access times entirely.
+        assert_eq!(
+            query_ids(&db, "", SortOrder::Id, 10),
+            vec!["20260730-alpha".to_string(), "20260730-gamma".to_string()]
+        );
+    }
+
+    #[test]
+    fn limit_is_respected_and_more_is_reported() {
+        let mut db = memory_db();
+        db.sync(
+            &[
+                workspace("alpha", &[]),
+                workspace("beta", &[]),
+                workspace("gamma", &[]),
+            ],
+            offset(),
+        )
+        .unwrap();
+
+        let page = db.query(&[], SortOrder::Id, 2, None).unwrap();
+        // The extra probe row must not leak into the results.
+        assert_eq!(page.workspaces.len(), 2);
+        assert!(page.has_more());
+    }
+
+    #[test]
+    fn last_page_reports_no_more() {
+        let mut db = memory_db();
+        db.sync(
+            &[workspace("alpha", &[]), workspace("beta", &[])],
+            offset(),
+        )
+        .unwrap();
+
+        let page = db.query(&[], SortOrder::Id, 2, None).unwrap();
+        assert_eq!(page.workspaces.len(), 2);
+        assert!(
+            !page.has_more(),
+            "exactly filling a page must not claim more results exist"
+        );
+    }
+
+    /// Walk every page and collect ids, for both sort orders.
+    fn paged_ids(db: &Db, sort: SortOrder, page_size: usize) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = db.query(&[], sort, page_size, cursor.as_ref()).unwrap();
+            ids.extend(page.workspaces.iter().map(|ws| ws.id.clone()));
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        ids
+    }
+
+    #[test]
+    fn paging_covers_every_row_exactly_once() {
+        let mut db = memory_db();
+        let all: Vec<Workspace> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| workspace(s, &[]))
+            .collect();
+        let ascending: Vec<String> = all.iter().map(|ws| ws.id.clone()).collect();
+        db.sync(&all, offset()).unwrap();
+
+        assert_eq!(paged_ids(&db, SortOrder::Id, 2), ascending);
+
+        // These workspaces share a creation date and so a last_access, making
+        // this the case where a missing tiebreak would skip or repeat rows
+        // across pages: recency falls back to id DESC, hence reverse order.
+        let descending: Vec<String> = ascending.iter().rev().cloned().collect();
+        assert_eq!(paged_ids(&db, SortOrder::Recency, 2), descending);
+    }
+
+    #[test]
+    fn paging_a_filtered_query_keeps_the_filter() {
+        let mut db = memory_db();
+        db.sync(
+            &[
+                workspace("alpha", &["keep"]),
+                workspace("beta", &["keep"]),
+                workspace("gamma", &[]),
+            ],
+            offset(),
+        )
+        .unwrap();
+
+        let tokens = crate::query::parse_str(":keep");
+        let first = db.query(&tokens, SortOrder::Id, 1, None).unwrap();
+        assert_eq!(first.workspaces[0].id, "20260730-alpha");
+        let second = db
+            .query(&tokens, SortOrder::Id, 1, first.next.as_ref())
+            .unwrap();
+        assert_eq!(second.workspaces[0].id, "20260730-beta");
+        assert!(!second.has_more());
+    }
+
+    #[test]
+    fn query_round_trips_workspace_fields() {
+        let mut db = memory_db();
+        let mut ws = workspace("wsjump", &["rust", "tool"]);
+        ws.desc = "line one\nline two".to_string();
+        let expected_path = ws.path.clone();
+        let expected_date = ws.date;
+        db.sync(&[ws], offset()).unwrap();
+
+        let page = db.query(&[], SortOrder::Id, 10, None).unwrap();
+        let got = &page.workspaces[0];
+        assert_eq!(got.id, "20260730-wsjump");
+        assert_eq!(got.date, expected_date);
+        assert_eq!(got.slug, "wsjump");
+        assert_eq!(got.tags, vec!["rust".to_string(), "tool".to_string()]);
+        assert_eq!(got.desc, "line one\nline two");
+        assert_eq!(got.path, expected_path);
+        assert!(got.last_access.is_some());
     }
 }

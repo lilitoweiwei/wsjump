@@ -88,7 +88,7 @@ pub fn parse_dir_name(name: &str) -> Option<(Date, String)> {
         return None;
     }
 
-    let date = parse_date_prefix(prefix)?;
+    let date = parse_date(prefix)?;
 
     // No slug part at all: "20260730".
     if rest.is_empty() {
@@ -106,7 +106,10 @@ pub fn parse_dir_name(name: &str) -> Option<(Date, String)> {
 
 /// Parse an 8-digit `YYYYMMDD` string into a real calendar date.
 /// Returns `None` if the digits do not form a valid date (e.g. "20261340").
-fn parse_date_prefix(prefix: &str) -> Option<Date> {
+pub fn parse_date(prefix: &str) -> Option<Date> {
+    if prefix.len() != 8 || !prefix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let year: i32 = prefix[0..4].parse().ok()?;
     let month_num: u8 = prefix[4..6].parse().ok()?;
     let day: u8 = prefix[6..8].parse().ok()?;
@@ -116,7 +119,7 @@ fn parse_date_prefix(prefix: &str) -> Option<Date> {
 }
 
 /// Render a date as the 8-digit `YYYYMMDD` form used in directory names and in
-/// the database's `date` column. Inverse of [`parse_date_prefix`].
+/// the database's `date` column. Inverse of [`parse_date`].
 pub fn format_date(date: Date) -> String {
     format!(
         "{:04}{:02}{:02}",
