@@ -7,3 +7,4 @@ edition = "2021"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 time = "0.3"
+rusqlite = { version = "0.37", features = ["bundled"] }
