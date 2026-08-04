@@ -39,7 +39,7 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 /// Draw the candidate list, highlighting the selected row. When there are no
 /// matches, show a hint instead.
 fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
-    if app.match_count() == 0 {
+    if app.loaded_count() == 0 {
         frame.render_widget(
             Paragraph::new("no matching workspace").style(Style::default().add_modifier(Modifier::DIM)),
             area,
@@ -49,7 +49,8 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
 
     let hscroll = app.hscroll();
     let items: Vec<ListItem> = app
-        .matched()
+        .results()
+        .iter()
         .map(|ws| ListItem::new(item_line(ws, hscroll)))
         .collect();
 
@@ -90,14 +91,34 @@ fn item_line(ws: &Workspace, hscroll: usize) -> Line<'static> {
 
 /// Draw the bottom status / help line.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    let position = if app.match_count() == 0 {
-        "0/0".to_string()
-    } else {
-        format!("{}/{}", app.selected() + 1, app.match_count())
-    };
     let text = format!(
-        "{}   up/down move   shift+left/right scroll   enter jump   esc quit",
-        position
+        "{}   {}   up/down move   shift+left/right scroll{}   enter jump   esc quit",
+        position(app),
+        app.sort().as_str(),
+        // Only advertise the toggle when it can actually do something.
+        if app.can_sort_by_recency() {
+            "   ctrl+s sort"
+        } else {
+            ""
+        },
     );
     frame.render_widget(Paragraph::new(text).style(Style::default()), area);
+}
+
+/// The "which row of how many" indicator.
+///
+/// The total is how many results have been fetched, not how many match: knowing
+/// the latter would need a second query counting the whole result set, which is
+/// exactly what paging avoids. A '+' marks that more exist, so the number is
+/// never mistaken for a total.
+fn position(app: &App) -> String {
+    if app.loaded_count() == 0 {
+        return "0/0".to_string();
+    }
+    format!(
+        "{}/{}{}",
+        app.selected() + 1,
+        app.loaded_count(),
+        if app.has_more() { "+" } else { "" }
+    )
 }

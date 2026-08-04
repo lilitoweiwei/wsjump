@@ -11,8 +11,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
-use wsjump_core::scan;
-use wsjump_core::workspace::sort_by_id;
+use wsjump_core::index::Index;
 
 use crate::app::App;
 use crate::render;
@@ -34,9 +33,12 @@ pub enum Outcome {
 /// selected path (consumed by the `ju` shell function).
 pub fn run() -> AppResult<Outcome> {
     let config = Config::load()?;
-    let mut workspaces = scan::scan(&config)?;
-    sort_by_id(&mut workspaces);
-    let mut app = App::new(workspaces);
+    // Opening the index also syncs it with the directory. That happens once per
+    // session rather than per query: re-syncing on every keystroke would tie
+    // typing latency to the number of workspaces, and the directory is very
+    // unlikely to change during a session lasting seconds.
+    let index = Index::open(&config)?;
+    let mut app = App::new(index, config.default_sort())?;
 
     let mut terminal = setup_terminal()?;
     let outcome = event_loop(&mut terminal, &mut app);
@@ -100,17 +102,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppResult<Option<Outcome>> {
     match key.code {
         KeyCode::Esc => Ok(Some(Outcome::Aborted)),
         KeyCode::Char('c') if ctrl => Ok(Some(Outcome::Aborted)),
-        KeyCode::Enter => match app.selected_path() {
+        // Selecting also records the visit, which is what recency ordering is
+        // built from.
+        KeyCode::Enter => match app.take_selected() {
             Some(path) => Ok(Some(Outcome::Selected(path))),
             // Nothing to select (empty match set) -> treat as abort.
             None => Ok(Some(Outcome::Aborted)),
         },
+        KeyCode::Char('s') if ctrl => {
+            app.toggle_sort()?;
+            Ok(None)
+        }
         KeyCode::Up => {
             app.select_prev();
             Ok(None)
         }
         KeyCode::Down => {
-            app.select_next();
+            app.select_next()?;
             Ok(None)
         }
         // Shift+Left/Right scroll the list horizontally to reveal truncated
@@ -123,10 +131,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppResult<Option<Outcome>> {
             app.scroll_right();
             Ok(None)
         }
-        // Everything else is fed to the input box; re-filter afterwards.
+        // Everything else is fed to the input box; re-query afterwards.
         _ => {
             if app.input_mut().handle_event(&Event::Key(key)).is_some() {
-                app.refilter();
+                app.reload()?;
             }
             Ok(None)
         }

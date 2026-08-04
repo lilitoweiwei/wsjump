@@ -12,3 +12,7 @@ wsjump-core = { path = "../wsjump-core" }
 ratatui = "0.29"
 crossterm = "0.28"
 tui-input = "0.11"
+
+[dev-dependencies]
+# Building a real database in tests needs a UTC offset to seed access times.
+time = "0.3"
