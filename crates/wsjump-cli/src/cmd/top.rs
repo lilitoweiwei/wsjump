@@ -1,27 +1,31 @@
-//! `wsjump top <query...>`: print the absolute path of the first matching
-//! workspace (lexicographic by id).
+//! `wsjump top [--sort=<order>] <query...>`: print the absolute path of the
+//! first matching workspace.
 
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
-use wsjump_core::workspace::sort_by_id;
-use wsjump_core::{filter, query, scan};
+use wsjump_core::index::Index;
+use wsjump_core::query;
 
-/// Run the `top` subcommand. `args` is the query token list (may be empty,
-/// meaning "match everything").
-pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
-    let mut workspaces = scan::scan(config)?;
-    sort_by_id(&mut workspaces);
-    let tokens = query::parse(args);
-    let matches = filter::filter(&workspaces, &tokens);
+use crate::cli::Query;
 
-    match matches.first() {
+/// Run the `top` subcommand. An empty query matches everything, so this prints
+/// whichever workspace the chosen order puts first.
+pub fn run(config: &Config, args: &Query) -> AppResult<()> {
+    let index = Index::open(config)?;
+    let tokens = query::parse(&args.tokens);
+    let sort = args.sort.unwrap_or_else(|| config.default_sort());
+
+    // Only the first row is ever printed, so ask for exactly one.
+    let page = index.query(&tokens, sort, 1, None)?;
+
+    match page.workspaces.first() {
         Some(ws) => {
             println!("{}", ws.path.display());
             Ok(())
         }
         None => Err(AppError::runtime(format!(
             "no workspace matches: {}",
-            args.join(" ")
+            args.tokens.join(" ")
         ))),
     }
 }

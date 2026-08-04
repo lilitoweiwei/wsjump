@@ -1,19 +1,22 @@
-//! `wsjump ls <query...>`: print one absolute path per matching workspace.
+//! `wsjump ls [--sort=<order>] <query...>`: print one absolute path per matching
+//! workspace.
 
 use wsjump_core::config::Config;
 use wsjump_core::error::AppResult;
-use wsjump_core::workspace::sort_by_id;
-use wsjump_core::{filter, query, scan};
+use wsjump_core::index::Index;
+use wsjump_core::query;
+
+use crate::cli::Query;
 
 /// Run the `ls` subcommand. An empty query lists all workspaces; an empty
 /// result set is normal and exits successfully with no output.
-pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
-    let mut workspaces = scan::scan(config)?;
-    sort_by_id(&mut workspaces);
-    let tokens = query::parse(args);
-    let matches = filter::filter(&workspaces, &tokens);
+pub fn run(config: &Config, args: &Query) -> AppResult<()> {
+    let index = Index::open(config)?;
+    let tokens = query::parse(&args.tokens);
+    let sort = args.sort.unwrap_or_else(|| config.default_sort());
 
-    for ws in matches {
+    // Listing is inherently unbounded, so paging would buy nothing here.
+    for ws in index.query_all(&tokens, sort)? {
         println!("{}", ws.path.display());
     }
     Ok(())

@@ -35,5 +35,6 @@ fn run(args: &[String]) -> AppResult<()> {
         Command::Top(query) => cmd::top::run(&Config::load()?, &query),
         Command::Ls(query) => cmd::ls::run(&Config::load()?, &query),
         Command::New(slug) => cmd::new::run(&Config::load()?, &slug),
+        Command::Touch(path) => cmd::touch::run(&Config::load()?, path.as_ref()),
     }
 }
