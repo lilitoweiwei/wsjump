@@ -311,6 +311,22 @@ impl Db {
 
         Ok(Page { workspaces, next })
     }
+
+    /// Record an access to `id` at `timestamp`.
+    ///
+    /// Returns whether a row was updated: `false` means the id is not in the
+    /// index, which callers may treat as "not a workspace" rather than a failure.
+    /// This is the only operation that ever changes `last_access`.
+    pub fn touch(&self, id: &str, timestamp: i64) -> AppResult<bool> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE workspace SET last_access = ?1 WHERE id = ?2",
+                params![timestamp, id],
+            )
+            .map_err(|e| sql_err(format!("cannot record access to '{}'", id), e))?;
+        Ok(updated > 0)
+    }
 }
 
 /// The ORDER BY clause for a sort order.
@@ -850,8 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn query_round_trips_workspace_fields() {
-        let mut db = memory_db();
+    fn query_round_trips_workspace_fields() {        let mut db = memory_db();
         let mut ws = workspace("wsjump", &["rust", "tool"]);
         ws.desc = "line one\nline two".to_string();
         let expected_path = ws.path.clone();
@@ -867,5 +882,64 @@ mod tests {
         assert_eq!(got.desc, "line one\nline two");
         assert_eq!(got.path, expected_path);
         assert!(got.last_access.is_some());
+    }
+
+    #[test]
+    fn touch_records_the_given_time() {
+        let mut db = memory_db();
+        db.sync(&[workspace("wsjump", &[])], offset()).unwrap();
+
+        assert!(db.touch("20260730-wsjump", 1_800_000_000).unwrap());
+        assert_eq!(
+            stored_last_access(&db, "20260730-wsjump"),
+            Some(1_800_000_000)
+        );
+    }
+
+    #[test]
+    fn touch_reports_an_unknown_id() {
+        let db = memory_db();
+        assert!(
+            !db.touch("20260730-nope", 1_800_000_000).unwrap(),
+            "touching an id that is not indexed must be reported, not silently succeed"
+        );
+    }
+
+    #[test]
+    fn touch_reorders_a_recency_query() {
+        let mut db = memory_db();
+        db.sync(
+            &[workspace("alpha", &[]), workspace("beta", &[])],
+            offset(),
+        )
+        .unwrap();
+
+        // The whole point of recording an access: the visited workspace becomes
+        // the first thing offered next time.
+        db.touch("20260730-alpha", 1_800_000_000).unwrap();
+        assert_eq!(
+            query_ids(&db, "", SortOrder::Recency, 10).first().unwrap(),
+            "20260730-alpha"
+        );
+
+        db.touch("20260730-beta", 1_800_000_001).unwrap();
+        assert_eq!(
+            query_ids(&db, "", SortOrder::Recency, 10).first().unwrap(),
+            "20260730-beta"
+        );
+    }
+
+    #[test]
+    fn touch_survives_a_later_sync() {
+        let mut db = memory_db();
+        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.touch("20260730-alpha", 1_800_000_000).unwrap();
+
+        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        assert_eq!(
+            stored_last_access(&db, "20260730-alpha"),
+            Some(1_800_000_000),
+            "a recorded access must outlive the syncs that follow it"
+        );
     }
 }

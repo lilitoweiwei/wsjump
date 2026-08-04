@@ -1,8 +1,10 @@
 //! Workspace data model and directory-name parsing.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+
+use crate::error::{AppError, AppResult};
 
 /// A single workspace, either discovered on disk or read back from the database.
 pub struct Workspace {
@@ -104,6 +106,48 @@ pub fn parse_dir_name(name: &str) -> Option<(Date, String)> {
     Some((date, slug))
 }
 
+/// Identify which workspace a path belongs to.
+///
+/// Returns the workspace's id (its directory name), or `None` if the path is not
+/// inside `workspaces_dir`. Paths *below* a workspace resolve to that workspace,
+/// so recording an access works from anywhere inside it.
+///
+/// Both sides are canonicalised before comparison: `workspaces_dir` may be
+/// spelled differently in the config than the path a shell reports (`G:/ws/w`
+/// versus `G:\ws\w`, `..` segments, or a symlinked route), and comparing the raw
+/// text would then wrongly reject a path that is in fact inside.
+pub fn id_for_path(workspaces_dir: &Path, path: &Path) -> AppResult<Option<String>> {
+    let root = canonical(workspaces_dir)?;
+    let target = canonical(path)?;
+
+    let relative = match target.strip_prefix(&root) {
+        Ok(relative) => relative,
+        Err(_) => return Ok(None),
+    };
+
+    // The first component is the workspace directory; anything deeper is inside
+    // it. No components at all means the path *is* `w/`, which is no workspace.
+    let first = relative.components().next();
+    let name = match first {
+        Some(Component::Normal(name)) => name.to_string_lossy().into_owned(),
+        _ => return Ok(None),
+    };
+
+    // A directory that is not a valid workspace name is not a workspace, even
+    // though it sits under `w/`.
+    if parse_dir_name(&name).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(name))
+}
+
+/// Canonicalise a path, reporting failure with the path in the message.
+fn canonical(path: &Path) -> AppResult<PathBuf> {
+    path.canonicalize().map_err(|e| {
+        AppError::runtime(format!("cannot resolve path '{}': {}", path.display(), e))
+    })
+}
+
 /// Parse an 8-digit `YYYYMMDD` string into a real calendar date.
 /// Returns `None` if the digits do not form a valid date (e.g. "20261340").
 pub fn parse_date(prefix: &str) -> Option<Date> {
@@ -127,4 +171,111 @@ pub fn format_date(date: Date) -> String {
         date.month() as u8,
         date.day()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A unique temporary directory standing in for `w/`, plus a guard that
+    /// removes it. Real directories are required because resolution
+    /// canonicalises, which only works on paths that exist.
+    struct TempRoot {
+        path: PathBuf,
+    }
+
+    impl TempRoot {
+        fn new(tag: &str) -> TempRoot {
+            let unique = format!(
+                "wsjump-test-{}-{}-{:?}",
+                tag,
+                std::process::id(),
+                std::thread::current().id()
+            );
+            let path = std::env::temp_dir().join(unique);
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create temp root");
+            TempRoot { path }
+        }
+
+        /// Create a directory under the root and return its path.
+        fn dir(&self, relative: &str) -> PathBuf {
+            let path = self.path.join(relative);
+            fs::create_dir_all(&path).expect("create temp dir");
+            path
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn workspace_directory_resolves_to_its_id() {
+        let root = TempRoot::new("ws-dir");
+        let ws = root.dir("20260730-wsjump");
+        assert_eq!(
+            id_for_path(&root.path, &ws).unwrap(),
+            Some("20260730-wsjump".to_string())
+        );
+    }
+
+    #[test]
+    fn path_inside_a_workspace_resolves_to_that_workspace() {
+        let root = TempRoot::new("nested");
+        let nested = root.dir("20260730-wsjump/crates/core");
+        // Recording an access must work from anywhere inside the workspace.
+        assert_eq!(
+            id_for_path(&root.path, &nested).unwrap(),
+            Some("20260730-wsjump".to_string())
+        );
+    }
+
+    #[test]
+    fn the_workspaces_dir_itself_is_no_workspace() {
+        let root = TempRoot::new("root-itself");
+        assert_eq!(id_for_path(&root.path, &root.path).unwrap(), None);
+    }
+
+    #[test]
+    fn path_outside_the_workspaces_dir_resolves_to_nothing() {
+        let root = TempRoot::new("outside");
+        let outside = root.dir("../wsjump-test-outside-sibling");
+        let result = id_for_path(&root.path, &outside).unwrap();
+        let _ = fs::remove_dir_all(&outside);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn directory_with_an_invalid_name_is_no_workspace() {
+        let root = TempRoot::new("bad-name");
+        let bad = root.dir("notaworkspace");
+        assert_eq!(id_for_path(&root.path, &bad).unwrap(), None);
+    }
+
+    #[test]
+    fn resolution_tolerates_unnormalised_paths() {
+        let root = TempRoot::new("unnormalised");
+        root.dir("20260730-wsjump");
+        // A shell can hand us a path with '.' or '..' segments; comparing raw
+        // text would reject this even though it is inside a workspace.
+        let messy = root.path.join("20260730-wsjump").join(".").join("sub/..");
+        assert_eq!(
+            id_for_path(&root.path, &messy).unwrap(),
+            Some("20260730-wsjump".to_string())
+        );
+    }
+
+    #[test]
+    fn resolution_reports_a_missing_path() {
+        let root = TempRoot::new("missing");
+        let missing = root.path.join("20260730-wsjump");
+        assert!(
+            id_for_path(&root.path, &missing).is_err(),
+            "a path that does not exist cannot be resolved and must be reported"
+        );
+    }
 }
