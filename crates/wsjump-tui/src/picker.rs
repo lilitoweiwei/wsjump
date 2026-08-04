@@ -12,6 +12,7 @@ use tui_input::backend::crossterm::EventHandler;
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::scan;
+use wsjump_core::workspace::sort_by_id;
 
 use crate::app::App;
 use crate::render;
@@ -33,7 +34,8 @@ pub enum Outcome {
 /// selected path (consumed by the `ju` shell function).
 pub fn run() -> AppResult<Outcome> {
     let config = Config::load()?;
-    let workspaces = scan::scan(&config)?;
+    let mut workspaces = scan::scan(&config)?;
+    sort_by_id(&mut workspaces);
     let mut app = App::new(workspaces);
 
     let mut terminal = setup_terminal()?;

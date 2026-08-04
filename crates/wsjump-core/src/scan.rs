@@ -11,8 +11,12 @@ use crate::workspace::{parse_dir_name, Workspace};
 ///
 /// Each valid workspace directory (name matches `YYYYMMDD[-slug]` with a real
 /// calendar date) is turned into a `Workspace`. Names that do not match are
-/// warned about on stderr and skipped. Results are sorted by `id`
-/// (lexicographic) for deterministic, reproducible output.
+/// warned about on stderr and skipped.
+///
+/// The result is in filesystem enumeration order: scanning only discovers, it
+/// does not order. Ordering is a query concern and belongs to the database.
+/// Scanned workspaces carry `last_access: None` because access history lives in
+/// the database, not on disk.
 pub fn scan(config: &Config) -> AppResult<Vec<Workspace>> {
     let dir = &config.workspaces_dir;
     let entries = fs::read_dir(dir).map_err(|e| {
@@ -72,11 +76,9 @@ pub fn scan(config: &Config) -> AppResult<Vec<Workspace>> {
             path,
             tags: m.tags,
             desc: m.desc,
+            last_access: None,
         });
     }
-
-    // Deterministic order independent of filesystem enumeration order.
-    workspaces.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(workspaces)
 }

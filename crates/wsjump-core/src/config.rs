@@ -14,6 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use time::UtcOffset;
 
 use crate::error::{AppError, AppResult};
 use crate::query::SortOrder;
@@ -79,6 +80,19 @@ impl Config {
     /// The configured default result order, or [`SortOrder::DEFAULT`].
     pub fn default_sort(&self) -> SortOrder {
         self.default_sort.unwrap_or(SortOrder::DEFAULT)
+    }
+
+    /// The configured fixed UTC offset, validated.
+    ///
+    /// Every date computation (today's prefix, a directory date's midnight)
+    /// must go through this so they cannot disagree about when a day starts.
+    pub fn utc_offset(&self) -> AppResult<UtcOffset> {
+        UtcOffset::from_hms(self.utc_offset_hours, 0, 0).map_err(|e| {
+            AppError::runtime(format!(
+                "invalid utc_offset_hours {}: {}",
+                self.utc_offset_hours, e
+            ))
+        })
     }
 }
 

@@ -3,12 +3,14 @@
 
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
+use wsjump_core::workspace::sort_by_id;
 use wsjump_core::{filter, query, scan};
 
 /// Run the `top` subcommand. `args` is the query token list (may be empty,
 /// meaning "match everything").
 pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
-    let workspaces = scan::scan(config)?;
+    let mut workspaces = scan::scan(config)?;
+    sort_by_id(&mut workspaces);
     let tokens = query::parse(args);
     let matches = filter::filter(&workspaces, &tokens);
 

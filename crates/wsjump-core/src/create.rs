@@ -3,10 +3,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
+use crate::workspace::format_date;
 
 /// Create a new workspace directory named `YYYYMMDD[-slug]` under the
 /// configured `workspaces_dir` and return its absolute path.
@@ -17,7 +18,7 @@ use crate::error::{AppError, AppResult};
 ///   no dedup / validation of the slug is performed.
 /// - An existing target directory is a conflict and aborts without overwrite.
 pub fn create_workspace(config: &Config, slug: &str) -> AppResult<PathBuf> {
-    let date_prefix = today_prefix(config.utc_offset_hours)?;
+    let date_prefix = today_prefix(config)?;
 
     // Empty slug -> "YYYYMMDD"; non-empty -> "YYYYMMDD-slug".
     let dir_name = if slug.is_empty() {
@@ -45,20 +46,9 @@ pub fn create_workspace(config: &Config, slug: &str) -> AppResult<PathBuf> {
     Ok(target)
 }
 
-/// Compute today's date as "YYYYMMDD" in the given fixed UTC offset (hours).
-fn today_prefix(utc_offset_hours: i8) -> AppResult<String> {
-    let offset = UtcOffset::from_hms(utc_offset_hours, 0, 0).map_err(|e| {
-        AppError::runtime(format!(
-            "invalid utc_offset_hours {}: {}",
-            utc_offset_hours, e
-        ))
-    })?;
+/// Compute today's date as "YYYYMMDD" in the configured fixed UTC offset.
+fn today_prefix(config: &Config) -> AppResult<String> {
+    let offset = config.utc_offset()?;
     let now = OffsetDateTime::now_utc().to_offset(offset);
-    let date = now.date();
-    Ok(format!(
-        "{:04}{:02}{:02}",
-        date.year(),
-        date.month() as u8,
-        date.day()
-    ))
+    Ok(format_date(now.date()))
 }
