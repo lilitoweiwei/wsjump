@@ -10,7 +10,7 @@
 //! to invent its own error handling.
 
 use crate::config::Config;
-use crate::db::{Cursor, Db, Page};
+use crate::db::{Cursor, Db, Page, SyncScope};
 use crate::error::AppResult;
 use crate::filter;
 use crate::query::{SortOrder, Token};
@@ -63,7 +63,8 @@ impl Index {
         let path = config.db_file().map_err(|e| e.message)?;
         let offset = config.utc_offset().map_err(|e| e.message)?;
         let mut db = Db::open(&path).map_err(|e| e.message)?;
-        db.sync(workspaces, offset).map_err(|e| e.message)?;
+        db.sync(workspaces, offset, &SyncScope::Everything)
+            .map_err(|e| e.message)?;
         Ok(db)
     }
 

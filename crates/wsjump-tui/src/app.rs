@@ -398,7 +398,8 @@ mod tests {
         let workspaces: Vec<Workspace> = slugs.iter().map(|s| workspace(s)).collect();
         let offset = time::UtcOffset::from_hms(8, 0, 0).unwrap();
         let mut db = wsjump_core::db::Db::open(&temp.path).expect("open db");
-        db.sync(&workspaces, offset).expect("sync");
+        db.sync(&workspaces, offset, &wsjump_core::db::SyncScope::Everything)
+            .expect("sync");
         App::new(Index::Indexed(db), sort).expect("build app")
     }
 

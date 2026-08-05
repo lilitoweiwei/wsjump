@@ -80,6 +80,36 @@ impl Page {
     }
 }
 
+/// Which workspaces a sync is allowed to touch.
+///
+/// Scope is separate from whether signatures are compared, because the two vary
+/// independently: an automatic sync is whole-tree and incremental, an explicit
+/// `wsjump sync` is whole-tree and forced, and `wsjump sync <path>` is one
+/// workspace and forced. Keeping them as parameters of one routine rather than
+/// as separate routines is what lets the incremental path be checked against the
+/// forced one for equivalence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncScope {
+    /// Reconcile the whole directory: rows absent from disk are deleted.
+    Everything,
+    /// Reconcile a single workspace, leaving every other row untouched.
+    ///
+    /// Deletion is still possible, but only of this id: the "in the database
+    /// but not on disk" rule must not be applied to workspaces this sync never
+    /// looked at, or a scoped sync would empty the index.
+    OnlyWorkspace(String),
+}
+
+impl SyncScope {
+    /// Whether a workspace with this id is within scope.
+    fn includes(&self, id: &str) -> bool {
+        match self {
+            SyncScope::Everything => true,
+            SyncScope::OnlyWorkspace(only) => only == id,
+        }
+    }
+}
+
 /// An open connection to the wsjump database.
 pub struct Db {
     conn: Connection,
@@ -251,9 +281,11 @@ impl Db {
     /// `None` on a database that has never been synced.
     pub fn synced_workspaces_dir(&self) -> AppResult<Option<String>> {
         self.conn
-            .query_row("SELECT workspaces_dir FROM sync_state WHERE id = 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT workspaces_dir FROM sync_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| sql_err("cannot read the recorded workspaces directory", e))
     }
@@ -288,7 +320,12 @@ impl Db {
     /// This is the deliberately dumb implementation: a full rescan every time.
     /// It is correct but pays the cost an index is supposed to avoid, so it is
     /// kept as one replaceable method that callers do not see into.
-    pub fn sync(&mut self, workspaces: &[Workspace], offset: UtcOffset) -> AppResult<()> {
+    pub fn sync(
+        &mut self,
+        workspaces: &[Workspace],
+        offset: UtcOffset,
+        scope: &SyncScope,
+    ) -> AppResult<()> {
         // One transaction, so a failure part-way cannot leave the index holding a
         // half-applied view of the directory.
         let tx = self
@@ -312,6 +349,9 @@ impl Db {
                 .map_err(|e| sql_err("cannot prepare workspace upsert", e))?;
 
             for ws in workspaces {
+                if !scope.includes(&ws.id) {
+                    continue;
+                }
                 upsert
                     .execute(params![
                         ws.id,
@@ -327,7 +367,8 @@ impl Db {
                     .map_err(|e| sql_err(format!("cannot store workspace '{}'", ws.id), e))?;
             }
 
-            delete_missing(&tx, workspaces)?;        }
+            delete_missing(&tx, workspaces, scope)?;
+        }
 
         tx.commit()
             .map_err(|e| sql_err("cannot commit sync transaction", e))
@@ -512,11 +553,20 @@ fn read_workspace(row: &Row<'_>) -> AppResult<Workspace> {
     })
 }
 
-/// Delete rows whose workspace is no longer on disk.///
+/// Delete rows whose workspace is no longer on disk.
+///
 /// The ids present on disk go into a temporary table rather than a giant
 /// `NOT IN (?, ?, ...)` list, which would grow the SQL with the number of
 /// workspaces and can exceed SQLite's parameter limit.
-fn delete_missing(tx: &Transaction<'_>, workspaces: &[Workspace]) -> AppResult<()> {
+///
+/// A scoped sync only ever deletes its own id. Everything outside the scope was
+/// never looked at, so "not on disk" says nothing about it -- applying the rule
+/// regardless would empty the index down to the one workspace that was synced.
+fn delete_missing(
+    tx: &Transaction<'_>,
+    workspaces: &[Workspace],
+    scope: &SyncScope,
+) -> AppResult<()> {
     // Dropped before returning so repeated syncs on one connection cannot
     // collide on the name.
     tx.execute_batch("CREATE TEMP TABLE present (id TEXT PRIMARY KEY)")
@@ -533,12 +583,24 @@ fn delete_missing(tx: &Transaction<'_>, workspaces: &[Workspace]) -> AppResult<(
         }
     }
 
-    tx.execute(
-        "DELETE FROM workspace
-         WHERE id NOT IN (SELECT id FROM present)",
-        [],
-    )
-    .map_err(|e| sql_err("cannot remove deleted workspaces", e))?;
+    match scope {
+        SyncScope::Everything => {
+            tx.execute(
+                "DELETE FROM workspace
+                 WHERE id NOT IN (SELECT id FROM present)",
+                [],
+            )
+            .map_err(|e| sql_err("cannot remove deleted workspaces", e))?;
+        }
+        SyncScope::OnlyWorkspace(id) => {
+            tx.execute(
+                "DELETE FROM workspace
+                 WHERE id = ?1 AND id NOT IN (SELECT id FROM present)",
+                params![id],
+            )
+            .map_err(|e| sql_err("cannot remove a deleted workspace", e))?;
+        }
+    }
 
     tx.execute_batch("DROP TABLE present")
         .map_err(|e| sql_err("cannot drop temporary id table", e))?;
@@ -588,6 +650,16 @@ mod tests {
         UtcOffset::from_hms(8, 0, 0).unwrap()
     }
 
+    impl Db {
+        /// Sync the whole tree at the tests' fixed offset.
+        ///
+        /// Scope and offset are the same in nearly every test, and spelling them
+        /// out at each call buries the part that differs.
+        fn sync_all(&mut self, workspaces: &[Workspace]) -> AppResult<()> {
+            self.sync(workspaces, offset(), &SyncScope::Everything)
+        }
+    }
+
     /// A workspace created on 2026-07-30 with the given slug and tags.
     fn workspace(slug: &str, tags: &[&str]) -> Workspace {
         Workspace {
@@ -606,6 +678,17 @@ mod tests {
         db.conn
             .query_row(
                 "SELECT last_access FROM workspace WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    /// The stored `tags` string of a row, or None if the row is absent.
+    fn stored_tags(db: &Db, id: &str) -> Option<String> {
+        db.conn
+            .query_row(
+                "SELECT tags FROM workspace WHERE id = ?1",
                 params![id],
                 |row| row.get(0),
             )
@@ -731,12 +814,9 @@ mod tests {
         // Only reachable by tampering, but it must degrade to "re-read this
         // file" rather than to a comparison against half a signature.
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
         db.conn
-            .execute(
-                "UPDATE workspace SET meta_mtime = 42, meta_size = NULL",
-                [],
-            )
+            .execute("UPDATE workspace SET meta_mtime = 42, meta_size = NULL", [])
             .unwrap();
 
         let stored = db.stored_signatures().unwrap();
@@ -765,7 +845,7 @@ mod tests {
         let mut db = memory_db();
         let ws = workspace("wsjump", &[]);
         let expected = ws.date_midnight(offset());
-        db.sync(&[ws], offset()).unwrap();
+        db.sync_all(&[ws]).unwrap();
 
         assert_eq!(
             stored_last_access(&db, "20260730-wsjump"),
@@ -777,7 +857,7 @@ mod tests {
     #[test]
     fn sync_never_overwrites_last_access() {
         let mut db = memory_db();
-        db.sync(&[workspace("wsjump", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("wsjump", &[])]).unwrap();
 
         // Simulate a recorded access far after the creation date.
         let accessed = 1_800_000_000;
@@ -791,7 +871,7 @@ mod tests {
         // Re-syncing must refresh mirrored columns but leave history alone.
         let mut changed = workspace("wsjump", &["tool"]);
         changed.desc = "now with a description".to_string();
-        db.sync(&[changed], offset()).unwrap();
+        db.sync_all(&[changed]).unwrap();
 
         assert_eq!(
             stored_last_access(&db, "20260730-wsjump"),
@@ -812,22 +892,93 @@ mod tests {
     #[test]
     fn sync_removes_workspaces_gone_from_disk() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("alpha", &[]), workspace("beta", &[])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("alpha", &[]), workspace("beta", &[])])
+            .unwrap();
         assert_eq!(stored_ids(&db).len(), 2);
 
-        db.sync(&[workspace("beta", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("beta", &[])]).unwrap();
         assert_eq!(stored_ids(&db), vec!["20260730-beta".to_string()]);
+    }
+
+    /// Sync only the named workspace, at the tests' fixed offset.
+    fn sync_only(db: &mut Db, id: &str, workspaces: &[Workspace]) {
+        db.sync(
+            workspaces,
+            offset(),
+            &SyncScope::OnlyWorkspace(id.to_string()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_scoped_sync_leaves_other_rows_alone() {
+        // The trap: deletion asks "which rows are not on disk?", and a scoped
+        // sync only looked at one workspace. Applying that rule unscoped would
+        // wipe every workspace the sync never examined.
+        let mut db = memory_db();
+        db.sync_all(&[workspace("alpha", &[]), workspace("beta", &[])])
+            .unwrap();
+
+        sync_only(&mut db, "20260730-alpha", &[workspace("alpha", &[])]);
+
+        assert_eq!(
+            stored_ids(&db),
+            vec!["20260730-alpha".to_string(), "20260730-beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_scoped_sync_updates_only_its_own_workspace() {
+        let mut db = memory_db();
+        db.sync_all(&[workspace("alpha", &["old"]), workspace("beta", &["old"])])
+            .unwrap();
+
+        // Both carry new tags on "disk", but only alpha is in scope.
+        sync_only(
+            &mut db,
+            "20260730-alpha",
+            &[workspace("alpha", &["new"]), workspace("beta", &["new"])],
+        );
+
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("new".to_string()));
+        assert_eq!(stored_tags(&db, "20260730-beta"), Some("old".to_string()));
+    }
+
+    #[test]
+    fn a_scoped_sync_deletes_its_workspace_when_it_is_gone() {
+        // Removing a workspace and syncing just that path is a legitimate way to
+        // let the index catch up, so the scope must still permit its own delete.
+        let mut db = memory_db();
+        db.sync_all(&[workspace("alpha", &[]), workspace("beta", &[])])
+            .unwrap();
+
+        sync_only(&mut db, "20260730-alpha", &[workspace("beta", &[])]);
+
+        assert_eq!(stored_ids(&db), vec!["20260730-beta".to_string()]);
+    }
+
+    #[test]
+    fn a_scoped_sync_can_add_a_new_workspace() {
+        let mut db = memory_db();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
+
+        sync_only(
+            &mut db,
+            "20260730-beta",
+            &[workspace("alpha", &[]), workspace("beta", &[])],
+        );
+
+        assert_eq!(
+            stored_ids(&db),
+            vec!["20260730-alpha".to_string(), "20260730-beta".to_string()]
+        );
     }
 
     #[test]
     fn sync_of_empty_disk_empties_the_index() {
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
-        db.sync(&[], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
+        db.sync_all(&[]).unwrap();
         assert!(stored_ids(&db).is_empty());
     }
 
@@ -835,8 +986,8 @@ mod tests {
     fn sync_can_run_twice_in_one_connection() {
         // The temp table used for deletion must not linger and collide.
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
         assert_eq!(stored_ids(&db).len(), 1);
     }
 
@@ -862,18 +1013,15 @@ mod tests {
     #[test]
     fn empty_query_matches_everything() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("alpha", &[]), workspace("beta", &[])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("alpha", &[]), workspace("beta", &[])])
+            .unwrap();
         assert_eq!(query_ids(&db, "", SortOrder::Id, 10).len(), 2);
     }
 
     #[test]
     fn text_token_matches_slug_substring_anywhere() {
         let mut db = memory_db();
-        db.sync(&[workspace("wsjump", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("wsjump", &[])]).unwrap();
         // Matching is "contains", not "starts with".
         assert_eq!(query_ids(&db, "jump", SortOrder::Id, 10).len(), 1);
         assert_eq!(query_ids(&db, "wsj", SortOrder::Id, 10).len(), 1);
@@ -884,7 +1032,7 @@ mod tests {
     #[test]
     fn matching_ignores_case() {
         let mut db = memory_db();
-        db.sync(&[workspace("WsJump", &["Tool"])], offset()).unwrap();
+        db.sync_all(&[workspace("WsJump", &["Tool"])]).unwrap();
         assert_eq!(query_ids(&db, "wsjump", SortOrder::Id, 10).len(), 1);
         assert_eq!(query_ids(&db, ":tool", SortOrder::Id, 10).len(), 1);
     }
@@ -892,7 +1040,7 @@ mod tests {
     #[test]
     fn text_token_matches_tags_too() {
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &["rust"])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &["rust"])]).unwrap();
         assert_eq!(query_ids(&db, "rust", SortOrder::Id, 10).len(), 1);
     }
 
@@ -901,7 +1049,7 @@ mod tests {
         let mut db = memory_db();
         let mut ws = workspace("alpha", &[]);
         ws.desc = "a note about databases".to_string();
-        db.sync(&[ws], offset()).unwrap();
+        db.sync_all(&[ws]).unwrap();
         // desc is excluded from the fast query by design.
         assert!(query_ids(&db, "databases", SortOrder::Id, 10).is_empty());
     }
@@ -909,7 +1057,7 @@ mod tests {
     #[test]
     fn text_token_does_not_match_the_date_prefix() {
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
         // Only slug and tags are searched, so the user never has to type a date.
         assert!(query_ids(&db, "20260730", SortOrder::Id, 10).is_empty());
     }
@@ -917,11 +1065,8 @@ mod tests {
     #[test]
     fn tag_token_searches_tags_only() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("rust", &[]), workspace("alpha", &["rust"])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("rust", &[]), workspace("alpha", &["rust"])])
+            .unwrap();
         // ':rust' must ignore the workspace whose *slug* is "rust".
         assert_eq!(
             query_ids(&db, ":rust", SortOrder::Id, 10),
@@ -932,13 +1077,10 @@ mod tests {
     #[test]
     fn multiple_tokens_combine_with_and() {
         let mut db = memory_db();
-        db.sync(
-            &[
-                workspace("alpha", &["rust", "tool"]),
-                workspace("beta", &["rust"]),
-            ],
-            offset(),
-        )
+        db.sync_all(&[
+            workspace("alpha", &["rust", "tool"]),
+            workspace("beta", &["rust"]),
+        ])
         .unwrap();
         assert_eq!(
             query_ids(&db, ":rust :tool", SortOrder::Id, 10),
@@ -949,11 +1091,8 @@ mod tests {
     #[test]
     fn wildcard_characters_are_matched_literally() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("plain", &[]), workspace("a_b", &[])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("plain", &[]), workspace("a_b", &[])])
+            .unwrap();
         // Unescaped, '_' is a LIKE wildcard and would also match "plain".
         assert_eq!(
             query_ids(&db, "a_b", SortOrder::Id, 10),
@@ -966,7 +1105,7 @@ mod tests {
     #[test]
     fn quotes_in_a_query_are_data_not_sql() {
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
         // Values are bound, so this is a harmless (non-matching) needle rather
         // than syntax; the row must also survive.
         assert!(query_ids(&db, "'; DROP TABLE workspace; --", SortOrder::Id, 10).is_empty());
@@ -976,14 +1115,11 @@ mod tests {
     #[test]
     fn recency_order_puts_the_most_recent_first() {
         let mut db = memory_db();
-        db.sync(
-            &[
-                workspace("alpha", &[]),
-                workspace("beta", &[]),
-                workspace("gamma", &[]),
-            ],
-            offset(),
-        )
+        db.sync_all(&[
+            workspace("alpha", &[]),
+            workspace("beta", &[]),
+            workspace("gamma", &[]),
+        ])
         .unwrap();
         set_last_access(&db, "20260730-alpha", 3_000);
         set_last_access(&db, "20260730-beta", 1_000);
@@ -1002,11 +1138,8 @@ mod tests {
     #[test]
     fn id_order_is_lexicographic() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("gamma", &[]), workspace("alpha", &[])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("gamma", &[]), workspace("alpha", &[])])
+            .unwrap();
         set_last_access(&db, "20260730-gamma", 9_000);
 
         // Explicit id order must ignore access times entirely.
@@ -1019,14 +1152,11 @@ mod tests {
     #[test]
     fn limit_is_respected_and_more_is_reported() {
         let mut db = memory_db();
-        db.sync(
-            &[
-                workspace("alpha", &[]),
-                workspace("beta", &[]),
-                workspace("gamma", &[]),
-            ],
-            offset(),
-        )
+        db.sync_all(&[
+            workspace("alpha", &[]),
+            workspace("beta", &[]),
+            workspace("gamma", &[]),
+        ])
         .unwrap();
 
         let page = db.query(&[], SortOrder::Id, 2, None).unwrap();
@@ -1038,11 +1168,8 @@ mod tests {
     #[test]
     fn last_page_reports_no_more() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("alpha", &[]), workspace("beta", &[])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("alpha", &[]), workspace("beta", &[])])
+            .unwrap();
 
         let page = db.query(&[], SortOrder::Id, 2, None).unwrap();
         assert_eq!(page.workspaces.len(), 2);
@@ -1075,7 +1202,7 @@ mod tests {
             .map(|s| workspace(s, &[]))
             .collect();
         let ascending: Vec<String> = all.iter().map(|ws| ws.id.clone()).collect();
-        db.sync(&all, offset()).unwrap();
+        db.sync_all(&all).unwrap();
 
         assert_eq!(paged_ids(&db, SortOrder::Id, 2), ascending);
 
@@ -1089,14 +1216,11 @@ mod tests {
     #[test]
     fn paging_a_filtered_query_keeps_the_filter() {
         let mut db = memory_db();
-        db.sync(
-            &[
-                workspace("alpha", &["keep"]),
-                workspace("beta", &["keep"]),
-                workspace("gamma", &[]),
-            ],
-            offset(),
-        )
+        db.sync_all(&[
+            workspace("alpha", &["keep"]),
+            workspace("beta", &["keep"]),
+            workspace("gamma", &[]),
+        ])
         .unwrap();
 
         let tokens = crate::query::parse_str(":keep");
@@ -1110,12 +1234,13 @@ mod tests {
     }
 
     #[test]
-    fn query_round_trips_workspace_fields() {        let mut db = memory_db();
+    fn query_round_trips_workspace_fields() {
+        let mut db = memory_db();
         let mut ws = workspace("wsjump", &["rust", "tool"]);
         ws.desc = "line one\nline two".to_string();
         let expected_path = ws.path.clone();
         let expected_date = ws.date;
-        db.sync(&[ws], offset()).unwrap();
+        db.sync_all(&[ws]).unwrap();
 
         let page = db.query(&[], SortOrder::Id, 10, None).unwrap();
         let got = &page.workspaces[0];
@@ -1131,7 +1256,7 @@ mod tests {
     #[test]
     fn touch_records_the_given_time() {
         let mut db = memory_db();
-        db.sync(&[workspace("wsjump", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("wsjump", &[])]).unwrap();
 
         assert!(db.touch("20260730-wsjump", 1_800_000_000).unwrap());
         assert_eq!(
@@ -1152,11 +1277,8 @@ mod tests {
     #[test]
     fn touch_reorders_a_recency_query() {
         let mut db = memory_db();
-        db.sync(
-            &[workspace("alpha", &[]), workspace("beta", &[])],
-            offset(),
-        )
-        .unwrap();
+        db.sync_all(&[workspace("alpha", &[]), workspace("beta", &[])])
+            .unwrap();
 
         // The whole point of recording an access: the visited workspace becomes
         // the first thing offered next time.
@@ -1176,10 +1298,10 @@ mod tests {
     #[test]
     fn touch_survives_a_later_sync() {
         let mut db = memory_db();
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
         db.touch("20260730-alpha", 1_800_000_000).unwrap();
 
-        db.sync(&[workspace("alpha", &[])], offset()).unwrap();
+        db.sync_all(&[workspace("alpha", &[])]).unwrap();
         assert_eq!(
             stored_last_access(&db, "20260730-alpha"),
             Some(1_800_000_000),
