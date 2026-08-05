@@ -20,7 +20,11 @@ impl Meta {
 }
 
 /// File name of the per-workspace metadata file.
-const META_FILE_NAME: &str = "wsmeta.txt";
+///
+/// Public because [`crate::signature`] stats the same file to decide whether
+/// re-parsing it is necessary; the two must never disagree about which file
+/// metadata lives in.
+pub const META_FILE_NAME: &str = "wsmeta.txt";
 
 /// Load and parse `<workspace>/wsmeta.txt`.
 ///
@@ -53,6 +57,16 @@ pub fn load(workspace_dir: &Path) -> Meta {
 /// - Every other line (including blank lines and any later ':' lines) is part
 ///   of the description, joined by '\n'. Content is preserved only for
 ///   substring matching; layout is irrelevant.
+///
+/// # Changing these rules requires a schema bump
+///
+/// The database caches the *result* of this function and re-runs it only when
+/// the file's [`crate::signature`] changes. Editing the rules here therefore
+/// does not retroactively fix already-stored rows: their signature still
+/// matches, so they are never re-parsed and keep results from the old rules
+/// forever. Any change to the parsing above must be accompanied by a bump of
+/// `SCHEMA_VERSION` in `db.rs`, whose migration clears the stored signatures and
+/// so forces a full re-read.
 fn parse(text: &str) -> Meta {
     let mut tags: Vec<String> = Vec::new();
     let mut tag_line_found = false;
