@@ -6,6 +6,7 @@
 
 mod cli;
 mod cmd;
+mod progress;
 
 use std::process::ExitCode;
 

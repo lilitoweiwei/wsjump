@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
-use wsjump_core::progress::SilentSink;
 use wsjump_core::workspace::id_for_possibly_missing_path;
+use crate::progress::StderrProgress;
 
 /// Run the `sync` subcommand.
 ///
@@ -30,9 +30,9 @@ pub fn run(config: &Config, path: Option<&String>) -> AppResult<()> {
                         target.display()
                     ))
                 })?;
-            Index::open_syncing_only(config, &id, &mut SilentSink)?
+            Index::open_syncing_only(config, &id, &mut StderrProgress::new())?
         }
-        None => Index::open_forcing_sync(config, &mut SilentSink)?,
+        None => Index::open_forcing_sync(config, &mut StderrProgress::new())?,
     };
 
     // An explicit command reports what it did, unlike the automatic sync, which
