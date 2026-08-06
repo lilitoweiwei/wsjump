@@ -94,6 +94,20 @@ impl Config {
             ))
         })
     }
+
+    /// A config pointing at `dir`, for tests that need to scan a real tree.
+    ///
+    /// Not behind `cfg(test)`: integration-style tests in sibling crates need it
+    /// too, and a second constructor is cheaper than exposing the fields.
+    #[doc(hidden)]
+    pub fn for_test(dir: &std::path::Path) -> Config {
+        Config {
+            workspaces_dir: dir.to_path_buf(),
+            utc_offset_hours: 8,
+            db_file: None,
+            default_sort: None,
+        }
+    }
 }
 
 /// Resolve the expected path of the config file: `<exe dir>/wsjump.toml`.

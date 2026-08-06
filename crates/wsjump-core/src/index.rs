@@ -10,11 +10,11 @@
 //! to invent its own error handling.
 
 use crate::config::Config;
-use crate::db::{Cursor, Db, Page, SyncScope};
+use crate::db::{Cursor, Db, Page, SyncOutcome, SyncScope};
 use crate::error::AppResult;
 use crate::filter;
 use crate::query::{SortOrder, Token};
-use crate::scan;
+use crate::scan::{self, Discovered};
 use crate::workspace::{now_timestamp, sort_by_id, Workspace};
 
 /// A queryable view of all workspaces, backed by the database when possible.
@@ -38,34 +38,75 @@ impl Index {
     /// Failure to open or sync is reported on stderr and degraded, not returned:
     /// the caller's real job is to find a workspace, and that is still possible.
     pub fn open(config: &Config) -> AppResult<Index> {
-        // A scan is needed either way: to sync, or to answer queries if the
-        // database is unusable.
-        let workspaces = scan::scan(config)?;
+        Self::sync_and_open(config, false).map(|(index, _)| index)
+    }
 
-        match Self::open_db(config, &workspaces) {
-            Ok(db) => Ok(Index::Indexed(db)),
+    /// Open the index, re-reading every workspace's metadata regardless of its
+    /// stored signature, and report what that did.
+    ///
+    /// This is `wsjump sync`: the way to repair an index whose signatures agree
+    /// with disk while its contents do not.
+    pub fn open_forcing_sync(config: &Config) -> AppResult<(Index, SyncOutcome)> {
+        Self::sync_and_open(config, true)
+    }
+
+    /// Open the index having synced only the given workspace.
+    pub fn open_syncing_only(config: &Config, id: &str) -> AppResult<(Index, SyncOutcome)> {
+        Self::open_with(config, &SyncScope::OnlyWorkspace(id.to_string()), true)
+    }
+
+    /// Open the index, syncing the whole tree.
+    fn sync_and_open(config: &Config, force: bool) -> AppResult<(Index, SyncOutcome)> {
+        Self::open_with(config, &SyncScope::Everything, force)
+    }
+
+    /// Discover the directory, then sync and open, degrading if the database
+    /// cannot be used.
+    ///
+    /// Discovery deliberately stops short of reading any `wsmeta.txt`: that is
+    /// the expensive part, and sync only needs it for workspaces whose signature
+    /// moved. The database-free fallback does need all of it, so it pays that
+    /// cost, but only when it is actually taken.
+    fn open_with(
+        config: &Config,
+        scope: &SyncScope,
+        force: bool,
+    ) -> AppResult<(Index, SyncOutcome)> {
+        let found = scan::discover(config)?;
+
+        match Self::open_db(config, &found, scope, force) {
+            Ok((db, outcome)) => Ok((Index::Indexed(db), outcome)),
             Err(message) => {
                 eprintln!(
                     "wsjump: warning: {}; continuing without the database \
                      (results ordered by name, visits not recorded)",
                     message
                 );
-                let mut workspaces = workspaces;
+                // Only now is the metadata of every workspace needed, since
+                // there is no index to answer from.
+                let mut workspaces: Vec<Workspace> =
+                    found.iter().map(scan::Discovered::load).collect();
                 sort_by_id(&mut workspaces);
-                Ok(Index::Degraded(workspaces))
+                Ok((Index::Degraded(workspaces), SyncOutcome::default()))
             }
         }
     }
 
     /// Open, migrate and sync the database, describing any failure as a string
     /// so the caller can decide to warn rather than abort.
-    fn open_db(config: &Config, workspaces: &[Workspace]) -> Result<Db, String> {
+    fn open_db(
+        config: &Config,
+        found: &[Discovered],
+        scope: &SyncScope,
+        force: bool,
+    ) -> Result<(Db, SyncOutcome), String> {
         let path = config.db_file().map_err(|e| e.message)?;
         let offset = config.utc_offset().map_err(|e| e.message)?;
         let mut db = Db::open(&path).map_err(|e| e.message)?;
-        db.sync(workspaces, offset, &SyncScope::Everything)
+        let outcome = db
+            .sync(found, offset, scope, force)
             .map_err(|e| e.message)?;
-        Ok(db)
+        Ok((db, outcome))
     }
 
     /// Whether recency ordering and visit recording are available.

@@ -18,7 +18,8 @@ use time::UtcOffset;
 
 use crate::error::{AppError, AppResult};
 use crate::query::{SortOrder, Token};
-use crate::signature::MetaSignature;
+use crate::scan::Discovered;
+use crate::signature::{self, MetaSignature};
 use crate::workspace::{format_date, parse_date, split_tags, Workspace};
 
 /// Schema version this build expects, stored in SQLite's `user_version`.
@@ -108,6 +109,21 @@ impl SyncScope {
             SyncScope::OnlyWorkspace(only) => only == id,
         }
     }
+}
+
+/// What a sync did, so callers can report it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncOutcome {
+    /// Workspaces considered, whether or not they needed work.
+    pub examined: usize,
+    /// Workspaces whose metadata was re-read and stored.
+    ///
+    /// In a steady state this is zero, which is the entire point of the
+    /// signatures; a test asserts on it directly, since an equivalent result
+    /// cannot distinguish "correctly skipped" from "re-read everything".
+    pub updated: usize,
+    /// Rows removed because their workspace is gone from disk.
+    pub deleted: usize,
 }
 
 /// An open connection to the wsjump database.
@@ -317,15 +333,23 @@ impl Db {
     /// - in the database but not on disk: delete, since keeping an access time
     ///   for a workspace that no longer exists only leaves an orphan row.
     ///
-    /// This is the deliberately dumb implementation: a full rescan every time.
-    /// It is correct but pays the cost an index is supposed to avoid, so it is
-    /// kept as one replaceable method that callers do not see into.
+    /// Metadata is re-read only where the stored [`crate::signature`] disagrees
+    /// with the file on disk, which is what keeps a steady-state sync from
+    /// touching any `wsmeta.txt` at all. Pass `force` to re-read regardless,
+    /// which is both the explicit `wsjump sync` and the reference behaviour the
+    /// incremental path is tested against.
+    ///
+    /// Returns what it did, for the caller to report.
     pub fn sync(
         &mut self,
-        workspaces: &[Workspace],
+        found: &[Discovered],
         offset: UtcOffset,
         scope: &SyncScope,
-    ) -> AppResult<()> {
+        force: bool,
+    ) -> AppResult<SyncOutcome> {
+        let stored = self.stored_signatures()?;
+        let mut outcome = SyncOutcome::default();
+
         // One transaction, so a failure part-way cannot leave the index holding a
         // half-applied view of the directory.
         let tx = self
@@ -337,21 +361,39 @@ impl Db {
             let mut upsert = tx
                 .prepare(
                     "INSERT INTO workspace
-                         (id, date, slug, tags, desc, path, last_access)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                         (id, date, slug, tags, desc, path, last_access,
+                          meta_mtime, meta_size)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT(id) DO UPDATE SET
                          date = excluded.date,
                          slug = excluded.slug,
                          tags = excluded.tags,
                          desc = excluded.desc,
-                         path = excluded.path",
+                         path = excluded.path,
+                         meta_mtime = excluded.meta_mtime,
+                         meta_size = excluded.meta_size",
                 )
                 .map_err(|e| sql_err("cannot prepare workspace upsert", e))?;
 
-            for ws in workspaces {
-                if !scope.includes(&ws.id) {
+            for entry in found {
+                if !scope.includes(&entry.id) {
                     continue;
                 }
+                outcome.examined += 1;
+
+                // A workspace absent from the database has no stored signature
+                // to compare, so it is always read.
+                let known = stored.contains_key(&entry.id);
+                if known && !force && !signature::is_stale(stored[&entry.id], entry.signature) {
+                    continue;
+                }
+
+                // The one expensive step, reached only for workspaces that
+                // actually changed.
+                let ws = entry.load();
+                outcome.updated += 1;
+
+                let (meta_mtime, meta_size) = signature_to_columns(entry.signature);
                 upsert
                     .execute(params![
                         ws.id,
@@ -363,15 +405,18 @@ impl Db {
                         // Only ever consulted by the INSERT branch above; the
                         // UPDATE branch deliberately omits last_access.
                         ws.date_midnight(offset),
+                        meta_mtime,
+                        meta_size,
                     ])
                     .map_err(|e| sql_err(format!("cannot store workspace '{}'", ws.id), e))?;
             }
 
-            delete_missing(&tx, workspaces, scope)?;
+            outcome.deleted = delete_missing(&tx, found, scope)?;
         }
 
         tx.commit()
-            .map_err(|e| sql_err("cannot commit sync transaction", e))
+            .map_err(|e| sql_err("cannot commit sync transaction", e))?;
+        Ok(outcome)
     }
 
     /// Fetch one page of workspaces matching `tokens`, ordered by `sort`.
@@ -553,7 +598,7 @@ fn read_workspace(row: &Row<'_>) -> AppResult<Workspace> {
     })
 }
 
-/// Delete rows whose workspace is no longer on disk.
+/// Delete rows whose workspace is no longer on disk, returning how many went.
 ///
 /// The ids present on disk go into a temporary table rather than a giant
 /// `NOT IN (?, ?, ...)` list, which would grow the SQL with the number of
@@ -564,9 +609,9 @@ fn read_workspace(row: &Row<'_>) -> AppResult<Workspace> {
 /// regardless would empty the index down to the one workspace that was synced.
 fn delete_missing(
     tx: &Transaction<'_>,
-    workspaces: &[Workspace],
+    found: &[Discovered],
     scope: &SyncScope,
-) -> AppResult<()> {
+) -> AppResult<usize> {
     // Dropped before returning so repeated syncs on one connection cannot
     // collide on the name.
     tx.execute_batch("CREATE TEMP TABLE present (id TEXT PRIMARY KEY)")
@@ -576,40 +621,54 @@ fn delete_missing(
         let mut insert = tx
             .prepare("INSERT OR IGNORE INTO present (id) VALUES (?1)")
             .map_err(|e| sql_err("cannot prepare temporary id insert", e))?;
-        for ws in workspaces {
+        for entry in found {
             insert
-                .execute(params![ws.id])
+                .execute(params![entry.id])
                 .map_err(|e| sql_err("cannot record present workspace id", e))?;
         }
     }
 
-    match scope {
-        SyncScope::Everything => {
-            tx.execute(
+    let deleted = match scope {
+        SyncScope::Everything => tx
+            .execute(
                 "DELETE FROM workspace
                  WHERE id NOT IN (SELECT id FROM present)",
                 [],
             )
-            .map_err(|e| sql_err("cannot remove deleted workspaces", e))?;
-        }
-        SyncScope::OnlyWorkspace(id) => {
-            tx.execute(
+            .map_err(|e| sql_err("cannot remove deleted workspaces", e))?,
+        SyncScope::OnlyWorkspace(id) => tx
+            .execute(
                 "DELETE FROM workspace
                  WHERE id = ?1 AND id NOT IN (SELECT id FROM present)",
                 params![id],
             )
-            .map_err(|e| sql_err("cannot remove a deleted workspace", e))?;
-        }
-    }
+            .map_err(|e| sql_err("cannot remove a deleted workspace", e))?,
+    };
 
     tx.execute_batch("DROP TABLE present")
         .map_err(|e| sql_err("cannot drop temporary id table", e))?;
-    Ok(())
+    Ok(deleted)
 }
 
 /// Wrap a rusqlite error as a runtime `AppError` with our own context.
 fn sql_err(context: impl Into<String>, e: rusqlite::Error) -> AppError {
     AppError::runtime(format!("{}: {}", context.into(), e))
+}
+
+/// The two column values to store for a signature.
+///
+/// A size too large for `i64` (absurd for a metadata file, but not
+/// unrepresentable) stores as no signature at all rather than as half a pair, so
+/// the file is simply re-read next time instead of being compared against a
+/// value we could not record faithfully.
+fn signature_to_columns(signature: Option<MetaSignature>) -> (Option<i64>, Option<i64>) {
+    match signature {
+        Some(sig) => match i64::try_from(sig.size) {
+            Ok(size) => (Some(sig.mtime_ticks), Some(size)),
+            Err(_) => (None, None),
+        },
+        None => (None, None),
+    }
 }
 
 /// Rebuild a signature from its two nullable columns.
@@ -634,6 +693,7 @@ fn signature_from_columns(mtime: Option<i64>, size: Option<i64>) -> Option<MetaS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use std::path::PathBuf;
     use time::{Date, Month};
 
@@ -650,14 +710,147 @@ mod tests {
         UtcOffset::from_hms(8, 0, 0).unwrap()
     }
 
-    impl Db {
-        /// Sync the whole tree at the tests' fixed offset.
-        ///
-        /// Scope and offset are the same in nearly every test, and spelling them
-        /// out at each call buries the part that differs.
-        fn sync_all(&mut self, workspaces: &[Workspace]) -> AppResult<()> {
-            self.sync(workspaces, offset(), &SyncScope::Everything)
+    /// A temporary `w/` directory that cleans itself up.
+    ///
+    /// Sync's whole job is reconciling against a real directory, and its
+    /// skip-when-unchanged behaviour is driven by real file timestamps. Faking
+    /// that would mean testing something other than what runs, so these tests
+    /// build actual directories.
+    struct TempTree {
+        root: PathBuf,
+    }
+
+    impl TempTree {
+        fn new(tag: &str) -> TempTree {
+            let name = format!(
+                "wsjump-db-test-{}-{}-{:?}",
+                tag,
+                std::process::id(),
+                std::thread::current().id()
+            );
+            let root = std::env::temp_dir().join(name);
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("create temp tree");
+            TempTree { root }
         }
+
+        /// Create a workspace directory, with a `wsmeta.txt` if tags are given.
+        fn add(&self, slug: &str, tags: &[&str]) -> PathBuf {
+            let dir = self.root.join(format!("20260730-{}", slug));
+            std::fs::create_dir_all(&dir).expect("create workspace dir");
+            if !tags.is_empty() {
+                let line = tags
+                    .iter()
+                    .map(|t| format!(":{}", t))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                std::fs::write(dir.join("wsmeta.txt"), line).expect("write wsmeta");
+            }
+            dir
+        }
+
+        /// Remove a workspace directory, as deleting it by hand would.
+        fn remove(&self, slug: &str) {
+            let dir = self.root.join(format!("20260730-{}", slug));
+            std::fs::remove_dir_all(dir).expect("remove workspace dir");
+        }
+
+        /// Overwrite a workspace's `wsmeta.txt` in place.
+        fn write_meta(&self, slug: &str, body: &str) {
+            let dir = self.root.join(format!("20260730-{}", slug));
+            std::fs::write(dir.join("wsmeta.txt"), body).expect("write wsmeta");
+        }
+
+        /// Delete a workspace's `wsmeta.txt`.
+        fn remove_meta(&self, slug: &str) {
+            let dir = self.root.join(format!("20260730-{}", slug));
+            std::fs::remove_file(dir.join("wsmeta.txt")).expect("remove wsmeta");
+        }
+
+        /// Discover the tree as sync would see it.
+        fn discover(&self) -> Vec<Discovered> {
+            let config = Config::for_test(&self.root);
+            crate::scan::discover(&config).expect("discover")
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl Db {
+        /// Sync the whole tree at the tests' fixed offset, comparing signatures.
+        ///
+        /// Scope, offset and force are the same in nearly every test, and
+        /// spelling them out at each call buries the part that differs.
+        fn sync_all(&mut self, workspaces: &[Workspace]) -> AppResult<SyncOutcome> {
+            self.sync(
+                &discovered(workspaces),
+                offset(),
+                &SyncScope::Everything,
+                false,
+            )
+        }
+
+        /// Sync a discovered tree, comparing signatures.
+        fn sync_found(&mut self, found: &[Discovered]) -> AppResult<SyncOutcome> {
+            self.sync(found, offset(), &SyncScope::Everything, false)
+        }
+
+        /// Sync a discovered tree, re-reading every workspace regardless.
+        fn sync_forced(&mut self, found: &[Discovered]) -> AppResult<SyncOutcome> {
+            self.sync(found, offset(), &SyncScope::Everything, true)
+        }
+
+        /// Insert rows directly, bypassing discovery.
+        ///
+        /// For tests about querying rather than syncing: they need rows with
+        /// particular tags and descriptions, and going through sync would mean
+        /// materialising a directory tree just to get metadata onto disk so it
+        /// could be read straight back.
+        fn seed_all(&self, workspaces: &[Workspace]) -> AppResult<()> {
+            for ws in workspaces {
+                self.conn
+                    .execute(
+                        "INSERT INTO workspace
+                             (id, date, slug, tags, desc, path, last_access)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            ws.id,
+                            format_date(ws.date),
+                            ws.slug,
+                            ws.tags_joined(),
+                            ws.desc,
+                            ws.path.to_string_lossy(),
+                            ws.date_midnight(offset()),
+                        ],
+                    )
+                    .map_err(|e| sql_err("seed workspace", e))?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Treat hand-built workspaces as if discovery had found them, with no
+    /// metadata file.
+    ///
+    /// Used by the tests concerned with the reconcile rules rather than with
+    /// change detection: what matters there is which rows appear, change or go.
+    /// Tags therefore have to come from a real file, so tests that assert on tags
+    /// use [`TempTree`].
+    fn discovered(workspaces: &[Workspace]) -> Vec<Discovered> {
+        workspaces
+            .iter()
+            .map(|ws| Discovered {
+                id: ws.id.clone(),
+                date: ws.date,
+                slug: ws.slug.clone(),
+                path: ws.path.clone(),
+                signature: None,
+            })
+            .collect()
     }
 
     /// A workspace created on 2026-07-30 with the given slug and tags.
@@ -707,6 +900,37 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         ids
+    }
+
+    /// Every row's meaningful content, for comparing two databases.
+    ///
+    /// Paths and signatures are excluded: two temporary trees live at different
+    /// locations and their files have different timestamps, so those differ for
+    /// reasons that have nothing to do with whether sync reconciled correctly.
+    fn rows_for_comparison(db: &Db) -> Vec<(String, String, String, String, i64)> {
+        let mut stmt = db
+            .conn
+            .prepare(
+                "SELECT id, date, slug, tags, desc, last_access
+                 FROM workspace ORDER BY id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                let tags: String = row.get(3)?;
+                let desc: String = row.get(4)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    format!("{}|{}", tags, desc),
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
     }
 
     #[test]
@@ -856,8 +1080,10 @@ mod tests {
 
     #[test]
     fn sync_never_overwrites_last_access() {
+        let tree = TempTree::new("last-access");
+        tree.add("wsjump", &[]);
         let mut db = memory_db();
-        db.sync_all(&[workspace("wsjump", &[])]).unwrap();
+        db.sync_found(&tree.discover()).unwrap();
 
         // Simulate a recorded access far after the creation date.
         let accessed = 1_800_000_000;
@@ -869,24 +1095,19 @@ mod tests {
             .unwrap();
 
         // Re-syncing must refresh mirrored columns but leave history alone.
-        let mut changed = workspace("wsjump", &["tool"]);
-        changed.desc = "now with a description".to_string();
-        db.sync_all(&[changed]).unwrap();
+        tree.write_meta("wsjump", ":tool\nnow with a description");
+        db.sync_found(&tree.discover()).unwrap();
 
         assert_eq!(
             stored_last_access(&db, "20260730-wsjump"),
             Some(accessed),
             "sync must not reset last_access, or recency ordering silently breaks"
         );
-        let tags: String = db
-            .conn
-            .query_row(
-                "SELECT tags FROM workspace WHERE id = ?1",
-                params!["20260730-wsjump"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(tags, "tool", "mirrored columns must still be refreshed");
+        assert_eq!(
+            stored_tags(&db, "20260730-wsjump"),
+            Some("tool".to_string()),
+            "mirrored columns must still be refreshed"
+        );
     }
 
     #[test]
@@ -900,12 +1121,232 @@ mod tests {
         assert_eq!(stored_ids(&db), vec!["20260730-beta".to_string()]);
     }
 
+    #[test]
+    fn a_steady_state_sync_reads_no_metadata() {
+        // The entire point of the signatures. An equivalence check cannot catch a
+        // regression here, because re-reading everything produces the same rows;
+        // only the count of re-reads distinguishes the two.
+        let tree = TempTree::new("steady");
+        tree.add("alpha", &["rust"]);
+        tree.add("beta", &[]);
+        let mut db = memory_db();
+
+        let first = db.sync_found(&tree.discover()).unwrap();
+        assert_eq!(first.updated, 2, "a first sync must read everything");
+
+        let second = db.sync_found(&tree.discover()).unwrap();
+        assert_eq!(
+            second.updated, 0,
+            "nothing changed on disk, so nothing may be re-read"
+        );
+        assert_eq!(second.examined, 2, "both are still checked");
+    }
+
+    #[test]
+    fn only_the_changed_workspace_is_reread() {
+        let tree = TempTree::new("one-change");
+        tree.add("alpha", &["rust"]);
+        tree.add("beta", &["tool"]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        tree.write_meta("alpha", ":changed");
+        let outcome = db.sync_found(&tree.discover()).unwrap();
+
+        assert_eq!(outcome.updated, 1, "only alpha moved");
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("changed".to_string()));
+        assert_eq!(stored_tags(&db, "20260730-beta"), Some("tool".to_string()));
+    }
+
+    #[test]
+    fn an_in_place_edit_is_detected() {
+        // The case a directory mtime cannot see, which is why the signature is
+        // taken from the metadata file itself.
+        let tree = TempTree::new("in-place");
+        tree.add("alpha", &["before"]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        tree.write_meta("alpha", ":after");
+        db.sync_found(&tree.discover()).unwrap();
+
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("after".to_string()));
+    }
+
+    #[test]
+    fn deleting_the_metadata_file_clears_what_it_contributed() {
+        // Otherwise the old tags stay in the index for good and the user can
+        // never get rid of them.
+        let tree = TempTree::new("meta-gone");
+        tree.add("alpha", &["stale"]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("stale".to_string()));
+
+        tree.remove_meta("alpha");
+        db.sync_found(&tree.discover()).unwrap();
+
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some(String::new()));
+    }
+
+    #[test]
+    fn adding_a_metadata_file_is_detected() {
+        let tree = TempTree::new("meta-added");
+        tree.add("alpha", &[]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        tree.write_meta("alpha", ":fresh");
+        db.sync_found(&tree.discover()).unwrap();
+
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("fresh".to_string()));
+    }
+
+    #[test]
+    fn an_edit_keeping_the_same_size_is_detected() {
+        let tree = TempTree::new("same-size");
+        tree.add("alpha", &[]);
+        tree.write_meta("alpha", ":aaa :bbb");
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        // Same byte count, different content.
+        tree.write_meta("alpha", ":bbb :aaa");
+        db.sync_found(&tree.discover()).unwrap();
+
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("bbb aaa".to_string())
+        );
+    }
+
+    #[test]
+    fn an_mtime_moving_backwards_is_detected() {
+        // Restoring an older copy, or checking out an older revision, changes the
+        // file while moving its mtime earlier. Comparing with '>' would miss it.
+        let tree = TempTree::new("mtime-back");
+        let dir = tree.add("alpha", &[]);
+        tree.write_meta("alpha", ":current");
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        tree.write_meta("alpha", ":restored");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(dir.join("wsmeta.txt"))
+            .expect("open wsmeta");
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .expect("set an older mtime");
+        drop(file);
+
+        db.sync_found(&tree.discover()).unwrap();
+
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("restored".to_string())
+        );
+    }
+
+    #[test]
+    fn forcing_a_sync_rereads_everything() {
+        let tree = TempTree::new("forced");
+        tree.add("alpha", &["rust"]);
+        tree.add("beta", &[]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        let outcome = db.sync_forced(&tree.discover()).unwrap();
+
+        assert_eq!(
+            outcome.updated, 2,
+            "a forced sync must not trust the signatures"
+        );
+    }
+
+    #[test]
+    fn forcing_a_sync_repairs_an_index_whose_signature_still_matches() {
+        // The reason the forced path exists: if the stored row is wrong while its
+        // signature agrees with disk, only a forced re-read can fix it.
+        let tree = TempTree::new("repair");
+        tree.add("alpha", &["real"]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
+        // Corrupt the row without touching the file.
+        db.conn
+            .execute("UPDATE workspace SET tags = 'wrong'", [])
+            .unwrap();
+
+        db.sync_found(&tree.discover()).unwrap();
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("wrong".to_string()),
+            "an incremental sync cannot see this, by design"
+        );
+
+        db.sync_forced(&tree.discover()).unwrap();
+        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("real".to_string()));
+    }
+
+    /// A named change to apply to a test tree.
+    type TreeChange = (&'static str, fn(&TempTree));
+
+    #[test]
+    fn an_incremental_sync_matches_a_forced_one() {
+        // The strongest guarantee available: whatever the sequence of changes, the
+        // cheap path must land on the same rows as the exhaustive one.
+        let changes: Vec<TreeChange> = vec![
+            ("a new workspace", |t| {
+                t.add("added", &["fresh"]);
+            }),
+            ("a deleted workspace", |t| t.remove("doomed")),
+            ("an edited metadata file", |t| {
+                t.write_meta("edited", ":changed")
+            }),
+            ("a deleted metadata file", |t| t.remove_meta("stripped")),
+            ("a new metadata file", |t| t.write_meta("bare", ":gained")),
+            ("a same-size edit", |t| t.write_meta("sized", ":yyy")),
+        ];
+
+        for (description, apply) in changes {
+            let incremental_tree = TempTree::new("equiv-inc");
+            let forced_tree = TempTree::new("equiv-forced");
+            for tree in [&incremental_tree, &forced_tree] {
+                tree.add("edited", &["before"]);
+                tree.add("stripped", &["doomed-tag"]);
+                tree.add("bare", &[]);
+                tree.add("doomed", &[]);
+                tree.add("sized", &[]);
+                tree.write_meta("sized", ":xxx");
+            }
+
+            let mut incremental = memory_db();
+            let mut forced = memory_db();
+            incremental.sync_found(&incremental_tree.discover()).unwrap();
+            forced.sync_found(&forced_tree.discover()).unwrap();
+
+            apply(&incremental_tree);
+            apply(&forced_tree);
+
+            incremental.sync_found(&incremental_tree.discover()).unwrap();
+            forced.sync_forced(&forced_tree.discover()).unwrap();
+
+            assert_eq!(
+                rows_for_comparison(&incremental),
+                rows_for_comparison(&forced),
+                "incremental and forced sync disagreed after {}",
+                description
+            );
+        }
+    }
+
     /// Sync only the named workspace, at the tests' fixed offset.
     fn sync_only(db: &mut Db, id: &str, workspaces: &[Workspace]) {
         db.sync(
-            workspaces,
+            &discovered(workspaces),
             offset(),
             &SyncScope::OnlyWorkspace(id.to_string()),
+            false,
         )
         .unwrap();
     }
@@ -929,16 +1370,22 @@ mod tests {
 
     #[test]
     fn a_scoped_sync_updates_only_its_own_workspace() {
+        let tree = TempTree::new("scoped-update");
+        tree.add("alpha", &["old"]);
+        tree.add("beta", &["old"]);
         let mut db = memory_db();
-        db.sync_all(&[workspace("alpha", &["old"]), workspace("beta", &["old"])])
-            .unwrap();
+        db.sync_found(&tree.discover()).unwrap();
 
-        // Both carry new tags on "disk", but only alpha is in scope.
-        sync_only(
-            &mut db,
-            "20260730-alpha",
-            &[workspace("alpha", &["new"]), workspace("beta", &["new"])],
-        );
+        // Both carry new tags on disk, but only alpha is in scope.
+        tree.write_meta("alpha", ":new");
+        tree.write_meta("beta", ":new");
+        db.sync(
+            &tree.discover(),
+            offset(),
+            &SyncScope::OnlyWorkspace("20260730-alpha".to_string()),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(stored_tags(&db, "20260730-alpha"), Some("new".to_string()));
         assert_eq!(stored_tags(&db, "20260730-beta"), Some("old".to_string()));
@@ -1031,16 +1478,16 @@ mod tests {
 
     #[test]
     fn matching_ignores_case() {
-        let mut db = memory_db();
-        db.sync_all(&[workspace("WsJump", &["Tool"])]).unwrap();
+        let db = memory_db();
+        db.seed_all(&[workspace("WsJump", &["Tool"])]).unwrap();
         assert_eq!(query_ids(&db, "wsjump", SortOrder::Id, 10).len(), 1);
         assert_eq!(query_ids(&db, ":tool", SortOrder::Id, 10).len(), 1);
     }
 
     #[test]
     fn text_token_matches_tags_too() {
-        let mut db = memory_db();
-        db.sync_all(&[workspace("alpha", &["rust"])]).unwrap();
+        let db = memory_db();
+        db.seed_all(&[workspace("alpha", &["rust"])]).unwrap();
         assert_eq!(query_ids(&db, "rust", SortOrder::Id, 10).len(), 1);
     }
 
@@ -1064,8 +1511,8 @@ mod tests {
 
     #[test]
     fn tag_token_searches_tags_only() {
-        let mut db = memory_db();
-        db.sync_all(&[workspace("rust", &[]), workspace("alpha", &["rust"])])
+        let db = memory_db();
+        db.seed_all(&[workspace("rust", &[]), workspace("alpha", &["rust"])])
             .unwrap();
         // ':rust' must ignore the workspace whose *slug* is "rust".
         assert_eq!(
@@ -1076,8 +1523,8 @@ mod tests {
 
     #[test]
     fn multiple_tokens_combine_with_and() {
-        let mut db = memory_db();
-        db.sync_all(&[
+        let db = memory_db();
+        db.seed_all(&[
             workspace("alpha", &["rust", "tool"]),
             workspace("beta", &["rust"]),
         ])
@@ -1215,8 +1662,8 @@ mod tests {
 
     #[test]
     fn paging_a_filtered_query_keeps_the_filter() {
-        let mut db = memory_db();
-        db.sync_all(&[
+        let db = memory_db();
+        db.seed_all(&[
             workspace("alpha", &["keep"]),
             workspace("beta", &["keep"]),
             workspace("gamma", &[]),
@@ -1235,12 +1682,12 @@ mod tests {
 
     #[test]
     fn query_round_trips_workspace_fields() {
-        let mut db = memory_db();
+        let db = memory_db();
         let mut ws = workspace("wsjump", &["rust", "tool"]);
         ws.desc = "line one\nline two".to_string();
         let expected_path = ws.path.clone();
         let expected_date = ws.date;
-        db.sync_all(&[ws]).unwrap();
+        db.seed_all(&[ws]).unwrap();
 
         let page = db.query(&[], SortOrder::Id, 10, None).unwrap();
         let got = &page.workspaces[0];

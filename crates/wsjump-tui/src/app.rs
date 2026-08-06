@@ -390,16 +390,34 @@ mod tests {
                 side.push(suffix);
                 let _ = std::fs::remove_file(PathBuf::from(side));
             }
+            // The directory tree the workspaces were discovered from.
+            let _ = std::fs::remove_dir_all(self.path.with_extension("tree"));
         }
     }
 
     /// An app backed by a real database holding `slugs`.
+    ///
+    /// The workspaces are materialised as real directories, because sync now
+    /// discovers them from disk rather than being handed a list.
     fn indexed_app(temp: &TempDb, slugs: &[&str], sort: SortOrder) -> App {
-        let workspaces: Vec<Workspace> = slugs.iter().map(|s| workspace(s)).collect();
+        let tree = temp.path.with_extension("tree");
+        let _ = std::fs::remove_dir_all(&tree);
+        for slug in slugs {
+            std::fs::create_dir_all(tree.join(format!("20260730-{}", slug)))
+                .expect("create workspace dir");
+        }
+        let config = wsjump_core::config::Config::for_test(&tree);
+        let found = wsjump_core::scan::discover(&config).expect("discover");
+
         let offset = time::UtcOffset::from_hms(8, 0, 0).unwrap();
         let mut db = wsjump_core::db::Db::open(&temp.path).expect("open db");
-        db.sync(&workspaces, offset, &wsjump_core::db::SyncScope::Everything)
-            .expect("sync");
+        db.sync(
+            &found,
+            offset,
+            &wsjump_core::db::SyncScope::Everything,
+            false,
+        )
+        .expect("sync");
         App::new(Index::Indexed(db), sort).expect("build app")
     }
 
