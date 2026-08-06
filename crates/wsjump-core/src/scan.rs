@@ -53,6 +53,19 @@ impl Discovered {
     }
 }
 
+/// The result of enumerating a `w/` directory.
+///
+/// The root travels with the entries deliberately. Sync has to know which
+/// directory the entries came from, in order to notice that `workspaces_dir` now
+/// points somewhere else; keeping the two together makes it impossible to sync
+/// one directory's entries while claiming they came from another.
+pub struct Discovery {
+    /// The directory that was enumerated.
+    pub root: PathBuf,
+    /// The workspaces found in it, in filesystem order.
+    pub workspaces: Vec<Discovered>,
+}
+
 /// Enumerate every workspace directory under `workspaces_dir`.
 ///
 /// Each valid workspace directory (name matches `YYYYMMDD[-slug]` with a real
@@ -62,7 +75,7 @@ impl Discovered {
 /// No `wsmeta.txt` is opened here; only stat'ed, which is markedly cheaper.
 /// The result is in filesystem enumeration order: discovery does not order,
 /// because ordering is a query concern and belongs to the database.
-pub fn discover(config: &Config) -> AppResult<Vec<Discovered>> {
+pub fn discover(config: &Config) -> AppResult<Discovery> {
     let dir = &config.workspaces_dir;
     let entries = fs::read_dir(dir).map_err(|e| {
         AppError::runtime(format!(
@@ -123,7 +136,10 @@ pub fn discover(config: &Config) -> AppResult<Vec<Discovered>> {
         });
     }
 
-    Ok(found)
+    Ok(Discovery {
+        root: dir.clone(),
+        workspaces: found,
+    })
 }
 
 /// Discover every workspace and read all of their metadata.
@@ -131,5 +147,9 @@ pub fn discover(config: &Config) -> AppResult<Vec<Discovered>> {
 /// Used where the whole picture is needed at once and there is no stored
 /// signature to compare against: the database-free fallback path.
 pub fn scan(config: &Config) -> AppResult<Vec<Workspace>> {
-    Ok(discover(config)?.iter().map(Discovered::load).collect())
+    Ok(discover(config)?
+        .workspaces
+        .iter()
+        .map(Discovered::load)
+        .collect())
 }

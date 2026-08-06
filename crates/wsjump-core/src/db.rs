@@ -18,7 +18,7 @@ use time::UtcOffset;
 
 use crate::error::{AppError, AppResult};
 use crate::query::{SortOrder, Token};
-use crate::scan::Discovered;
+use crate::scan::{Discovered, Discovery};
 use crate::signature::{self, MetaSignature};
 use crate::workspace::{format_date, parse_date, split_tags, Workspace};
 
@@ -306,21 +306,6 @@ impl Db {
             .map_err(|e| sql_err("cannot read the recorded workspaces directory", e))
     }
 
-    /// Record which `workspaces_dir` the index now reflects.
-    ///
-    /// Written through the single-row upsert the `CHECK (id = 1)` constraint
-    /// makes possible, so there is no read-then-decide step that could race.
-    pub fn set_synced_workspaces_dir(&self, dir: &str) -> AppResult<()> {
-        self.conn
-            .execute(
-                "INSERT INTO sync_state (id, workspaces_dir) VALUES (1, ?1)
-                 ON CONFLICT(id) DO UPDATE SET workspaces_dir = excluded.workspaces_dir",
-                params![dir],
-            )
-            .map_err(|e| sql_err("cannot record the workspaces directory", e))?;
-        Ok(())
-    }
-
     /// Reconcile the database with the workspaces found on disk.
     ///
     /// Disk is the truth for everything except `last_access`, which exists only
@@ -342,13 +327,19 @@ impl Db {
     /// Returns what it did, for the caller to report.
     pub fn sync(
         &mut self,
-        found: &[Discovered],
+        found: &Discovery,
         offset: UtcOffset,
         scope: &SyncScope,
         force: bool,
     ) -> AppResult<SyncOutcome> {
         let stored = self.stored_signatures()?;
         let mut outcome = SyncOutcome::default();
+
+        // Signatures describe files under a particular root. If that root has
+        // moved, they describe files we are no longer looking at, and a matching
+        // signature would wrongly keep a row whose stored path is now wrong.
+        let root = found.root.to_string_lossy().into_owned();
+        let force = force || self.synced_workspaces_dir()?.as_deref() != Some(root.as_str());
 
         // One transaction, so a failure part-way cannot leave the index holding a
         // half-applied view of the directory.
@@ -375,7 +366,7 @@ impl Db {
                 )
                 .map_err(|e| sql_err("cannot prepare workspace upsert", e))?;
 
-            for entry in found {
+            for entry in &found.workspaces {
                 if !scope.includes(&entry.id) {
                     continue;
                 }
@@ -411,7 +402,21 @@ impl Db {
                     .map_err(|e| sql_err(format!("cannot store workspace '{}'", ws.id), e))?;
             }
 
-            outcome.deleted = delete_missing(&tx, found, scope)?;
+            outcome.deleted = delete_missing(&tx, &found.workspaces, scope)?;
+
+            // Recorded inside the transaction: if the sync rolls back, so must
+            // the claim about which directory the index reflects.
+            //
+            // Skipped for a scoped sync, which only looked at one workspace and
+            // so cannot vouch for the tree as a whole.
+            if matches!(scope, SyncScope::Everything) {
+                tx.execute(
+                    "INSERT INTO sync_state (id, workspaces_dir) VALUES (1, ?1)
+                     ON CONFLICT(id) DO UPDATE SET workspaces_dir = excluded.workspaces_dir",
+                    params![root],
+                )
+                .map_err(|e| sql_err("cannot record the workspaces directory", e))?;
+            }
         }
 
         tx.commit()
@@ -768,7 +773,7 @@ mod tests {
         }
 
         /// Discover the tree as sync would see it.
-        fn discover(&self) -> Vec<Discovered> {
+        fn discover(&self) -> Discovery {
             let config = Config::for_test(&self.root);
             crate::scan::discover(&config).expect("discover")
         }
@@ -795,12 +800,12 @@ mod tests {
         }
 
         /// Sync a discovered tree, comparing signatures.
-        fn sync_found(&mut self, found: &[Discovered]) -> AppResult<SyncOutcome> {
+        fn sync_found(&mut self, found: &Discovery) -> AppResult<SyncOutcome> {
             self.sync(found, offset(), &SyncScope::Everything, false)
         }
 
         /// Sync a discovered tree, re-reading every workspace regardless.
-        fn sync_forced(&mut self, found: &[Discovered]) -> AppResult<SyncOutcome> {
+        fn sync_forced(&mut self, found: &Discovery) -> AppResult<SyncOutcome> {
             self.sync(found, offset(), &SyncScope::Everything, true)
         }
 
@@ -840,17 +845,23 @@ mod tests {
     /// change detection: what matters there is which rows appear, change or go.
     /// Tags therefore have to come from a real file, so tests that assert on tags
     /// use [`TempTree`].
-    fn discovered(workspaces: &[Workspace]) -> Vec<Discovered> {
-        workspaces
-            .iter()
-            .map(|ws| Discovered {
-                id: ws.id.clone(),
-                date: ws.date,
-                slug: ws.slug.clone(),
-                path: ws.path.clone(),
-                signature: None,
-            })
-            .collect()
+    fn discovered(workspaces: &[Workspace]) -> Discovery {
+        Discovery {
+            // These workspaces are invented rather than found, so name the root
+            // after where their paths claim to be; sync compares it against
+            // sync_state, and a stable value keeps repeat syncs incremental.
+            root: PathBuf::from("G:/ws/w"),
+            workspaces: workspaces
+                .iter()
+                .map(|ws| Discovered {
+                    id: ws.id.clone(),
+                    date: ws.date,
+                    slug: ws.slug.clone(),
+                    path: ws.path.clone(),
+                    signature: None,
+                })
+                .collect(),
+        }
     }
 
     /// A workspace created on 2026-07-30 with the given slug and tags.
@@ -1001,9 +1012,14 @@ mod tests {
         // The single-row invariant is enforced by the database rather than by
         // callers remembering it; a second row would make reads pick an
         // arbitrary one.
-        let db = memory_db();
-        db.set_synced_workspaces_dir("G:/ws/w").unwrap();
-        db.set_synced_workspaces_dir("H:/other/w").unwrap();
+        let tree_a = TempTree::new("state-a");
+        let tree_b = TempTree::new("state-b");
+        tree_a.add("alpha", &[]);
+        tree_b.add("alpha", &[]);
+        let mut db = memory_db();
+
+        db.sync_found(&tree_a.discover()).unwrap();
+        db.sync_found(&tree_b.discover()).unwrap();
 
         let count: i64 = db
             .conn
@@ -1012,14 +1028,17 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(
             db.synced_workspaces_dir().unwrap(),
-            Some("H:/other/w".to_string())
+            Some(tree_b.root.to_string_lossy().into_owned())
         );
     }
 
     #[test]
     fn sync_state_rejects_a_second_row() {
-        let db = memory_db();
-        db.set_synced_workspaces_dir("G:/ws/w").unwrap();
+        let tree = TempTree::new("state-check");
+        tree.add("alpha", &[]);
+        let mut db = memory_db();
+        db.sync_found(&tree.discover()).unwrap();
+
         let result = db.conn.execute(
             "INSERT INTO sync_state (id, workspaces_dir) VALUES (2, 'H:/other/w')",
             [],
@@ -1030,6 +1049,84 @@ mod tests {
     #[test]
     fn a_database_never_synced_has_no_recorded_directory() {
         let db = memory_db();
+        assert_eq!(db.synced_workspaces_dir().unwrap(), None);
+    }
+
+    #[test]
+    fn repointing_the_workspaces_directory_rereads_everything() {
+        // The trap: two trees holding a same-named workspace whose metadata files
+        // are byte-identical AND share an mtime, so the signatures match exactly.
+        // Without the recorded root, sync sees "unchanged" and keeps the row --
+        // including its path, which now points into the old tree and would send
+        // the user to the wrong place.
+        let old_tree = TempTree::new("repoint-old");
+        let new_tree = TempTree::new("repoint-new");
+        let old_dir = old_tree.add("alpha", &[]);
+        let new_dir = new_tree.add("alpha", &[]);
+        old_tree.write_meta("alpha", ":same");
+        new_tree.write_meta("alpha", ":same");
+
+        // Force the mtimes to agree, so only the root differs.
+        let shared = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000);
+        for dir in [&old_dir, &new_dir] {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(dir.join("wsmeta.txt"))
+                .expect("open wsmeta");
+            file.set_modified(shared).expect("set mtime");
+        }
+
+        let mut db = memory_db();
+        db.sync_found(&old_tree.discover()).unwrap();
+
+        // Precondition: the signatures really are identical, so the only thing
+        // that can trigger a re-read is the changed root.
+        let old_sig = crate::signature::read(&old_dir);
+        let new_sig = crate::signature::read(&new_dir);
+        assert_eq!(
+            old_sig, new_sig,
+            "test is pointless unless the signatures match"
+        );
+
+        let outcome = db.sync_found(&new_tree.discover()).unwrap();
+
+        assert_eq!(
+            outcome.updated, 1,
+            "a moved root must invalidate every signature"
+        );
+        let path: String = db
+            .conn
+            .query_row(
+                "SELECT path FROM workspace WHERE id = ?1",
+                params!["20260730-alpha"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            path.starts_with(&new_tree.root.to_string_lossy().into_owned()),
+            "stored path must point into the new tree, got {}",
+            path
+        );
+    }
+
+    #[test]
+    fn a_scoped_sync_does_not_claim_the_whole_directory() {
+        // It only looked at one workspace, so it cannot vouch for the tree. If it
+        // recorded the root anyway, a later whole-tree sync would believe the
+        // index already matched and skip everything else.
+        let tree = TempTree::new("scoped-state");
+        tree.add("alpha", &[]);
+        tree.add("beta", &[]);
+        let mut db = memory_db();
+
+        db.sync(
+            &tree.discover(),
+            offset(),
+            &SyncScope::OnlyWorkspace("20260730-alpha".to_string()),
+            false,
+        )
+        .unwrap();
+
         assert_eq!(db.synced_workspaces_dir().unwrap(), None);
     }
 

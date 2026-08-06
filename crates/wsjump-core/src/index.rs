@@ -14,7 +14,7 @@ use crate::db::{Cursor, Db, Page, SyncOutcome, SyncScope};
 use crate::error::AppResult;
 use crate::filter;
 use crate::query::{SortOrder, Token};
-use crate::scan::{self, Discovered};
+use crate::scan::{self, Discovery};
 use crate::workspace::{now_timestamp, sort_by_id, Workspace};
 
 /// A queryable view of all workspaces, backed by the database when possible.
@@ -85,7 +85,7 @@ impl Index {
                 // Only now is the metadata of every workspace needed, since
                 // there is no index to answer from.
                 let mut workspaces: Vec<Workspace> =
-                    found.iter().map(scan::Discovered::load).collect();
+                    found.workspaces.iter().map(scan::Discovered::load).collect();
                 sort_by_id(&mut workspaces);
                 Ok((Index::Degraded(workspaces), SyncOutcome::default()))
             }
@@ -96,7 +96,7 @@ impl Index {
     /// so the caller can decide to warn rather than abort.
     fn open_db(
         config: &Config,
-        found: &[Discovered],
+        found: &Discovery,
         scope: &SyncScope,
         force: bool,
     ) -> Result<(Db, SyncOutcome), String> {
