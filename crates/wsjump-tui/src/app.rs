@@ -416,6 +416,7 @@ mod tests {
             offset,
             &wsjump_core::db::SyncScope::Everything,
             false,
+            &mut wsjump_core::progress::SilentSink,
         )
         .expect("sync");
         App::new(Index::Indexed(db), sort).expect("build app")

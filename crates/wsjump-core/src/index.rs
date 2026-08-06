@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::db::{Cursor, Db, Page, SyncOutcome, SyncScope};
 use crate::error::AppResult;
 use crate::filter;
+use crate::progress::ProgressSink;
 use crate::query::{SortOrder, Token};
 use crate::scan::{self, Discovery};
 use crate::workspace::{now_timestamp, sort_by_id, Workspace};
@@ -37,8 +38,11 @@ impl Index {
     ///
     /// Failure to open or sync is reported on stderr and degraded, not returned:
     /// the caller's real job is to find a workspace, and that is still possible.
-    pub fn open(config: &Config) -> AppResult<Index> {
-        Self::sync_and_open(config, false).map(|(index, _)| index)
+    ///
+    /// `sink` is where slow-sync progress goes; pass
+    /// [`crate::progress::SilentSink`] to say nothing.
+    pub fn open(config: &Config, sink: &mut dyn ProgressSink) -> AppResult<Index> {
+        Self::open_with(config, &SyncScope::Everything, false, sink).map(|(index, _)| index)
     }
 
     /// Open the index, re-reading every workspace's metadata regardless of its
@@ -46,18 +50,25 @@ impl Index {
     ///
     /// This is `wsjump sync`: the way to repair an index whose signatures agree
     /// with disk while its contents do not.
-    pub fn open_forcing_sync(config: &Config) -> AppResult<(Index, SyncOutcome)> {
-        Self::sync_and_open(config, true)
+    pub fn open_forcing_sync(
+        config: &Config,
+        sink: &mut dyn ProgressSink,
+    ) -> AppResult<(Index, SyncOutcome)> {
+        Self::open_with(config, &SyncScope::Everything, true, sink)
     }
 
     /// Open the index having synced only the given workspace.
-    pub fn open_syncing_only(config: &Config, id: &str) -> AppResult<(Index, SyncOutcome)> {
-        Self::open_with(config, &SyncScope::OnlyWorkspace(id.to_string()), true)
-    }
-
-    /// Open the index, syncing the whole tree.
-    fn sync_and_open(config: &Config, force: bool) -> AppResult<(Index, SyncOutcome)> {
-        Self::open_with(config, &SyncScope::Everything, force)
+    pub fn open_syncing_only(
+        config: &Config,
+        id: &str,
+        sink: &mut dyn ProgressSink,
+    ) -> AppResult<(Index, SyncOutcome)> {
+        Self::open_with(
+            config,
+            &SyncScope::OnlyWorkspace(id.to_string()),
+            true,
+            sink,
+        )
     }
 
     /// Discover the directory, then sync and open, degrading if the database
@@ -71,10 +82,11 @@ impl Index {
         config: &Config,
         scope: &SyncScope,
         force: bool,
+        sink: &mut dyn ProgressSink,
     ) -> AppResult<(Index, SyncOutcome)> {
         let found = scan::discover(config)?;
 
-        match Self::open_db(config, &found, scope, force) {
+        match Self::open_db(config, &found, scope, force, sink) {
             Ok((db, outcome)) => Ok((Index::Indexed(db), outcome)),
             Err(message) => {
                 eprintln!(
@@ -99,12 +111,13 @@ impl Index {
         found: &Discovery,
         scope: &SyncScope,
         force: bool,
+        sink: &mut dyn ProgressSink,
     ) -> Result<(Db, SyncOutcome), String> {
         let path = config.db_file().map_err(|e| e.message)?;
         let offset = config.utc_offset().map_err(|e| e.message)?;
         let mut db = Db::open(&path).map_err(|e| e.message)?;
         let outcome = db
-            .sync(found, offset, scope, force)
+            .sync(found, offset, scope, force, sink)
             .map_err(|e| e.message)?;
         Ok((db, outcome))
     }

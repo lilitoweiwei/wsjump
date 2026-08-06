@@ -1,0 +1,256 @@
+//! Reporting slow work in progress, so a pause is never unexplained.
+//!
+//! Sync is normally a few milliseconds and any output would be noise. But it can
+//! be slow -- a first run, a schema upgrade, a moved `workspaces_dir`, a cold
+//! cache, a very large tree -- and then silence leaves the user staring at a
+//! stalled prompt.
+//!
+//! So progress is *deferred*: nothing is shown until the work has already taken
+//! longer than a threshold, and the message appears while the user is still
+//! waiting rather than as a summary afterwards, which would be useless.
+//!
+//! Core decides *when* there is something worth saying; front-ends decide how to
+//! show it, because a terminal, a pipe and a full-screen UI need different
+//! treatment.
+
+use std::time::{Duration, Instant};
+
+/// How long work must run before its progress is worth mentioning.
+///
+/// Chosen to sit above any plausible steady-state sync, so the fast path stays
+/// completely silent, and below the point where a person starts wondering if
+/// something is broken.
+const QUIET_PERIOD: Duration = Duration::from_millis(200);
+
+/// Shortest gap between updates once reporting has begun.
+///
+/// Without this, a large tree would emit a write syscall per workspace, which
+/// can itself dominate the work being reported on.
+const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How far along a piece of slow work is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Items dealt with so far.
+    pub done: usize,
+    /// Items in total, when known.
+    pub total: usize,
+}
+
+/// Rate-limited progress reporting for one unit of work.
+///
+/// Construct one, call [`Reporter::advance`] as the work proceeds, and
+/// [`Reporter::finish`] at the end. Nothing reaches the sink until the work has
+/// outlasted the quiet period.
+pub struct Reporter<'a> {
+    started: Instant,
+    last_update: Option<Instant>,
+    /// Whether anything has been emitted, so `finish` knows if there is
+    /// something to clean up.
+    reported: bool,
+    sink: &'a mut dyn ProgressSink,
+}
+
+/// Where progress goes. Implemented per front-end.
+pub trait ProgressSink {
+    /// Show current progress, replacing anything shown before.
+    fn update(&mut self, progress: Progress);
+    /// Work is over; remove any progress display.
+    ///
+    /// Only called when [`ProgressSink::update`] was called at least once, so an
+    /// implementation never has to undo something it never did.
+    fn clear(&mut self);
+}
+
+impl<'a> Reporter<'a> {
+    /// Begin timing a unit of work reporting to `sink`.
+    pub fn new(sink: &'a mut dyn ProgressSink) -> Reporter<'a> {
+        Reporter {
+            started: Instant::now(),
+            last_update: None,
+            reported: false,
+            sink,
+        }
+    }
+
+    /// Note progress, emitting an update if one is due.
+    pub fn advance(&mut self, progress: Progress) {
+        let now = Instant::now();
+        if now.duration_since(self.started) < QUIET_PERIOD {
+            return;
+        }
+        if let Some(last) = self.last_update {
+            if now.duration_since(last) < UPDATE_INTERVAL {
+                return;
+            }
+        }
+        self.last_update = Some(now);
+        self.reported = true;
+        self.sink.update(progress);
+    }
+
+    /// Finish the work, clearing the display if anything was shown.
+    pub fn finish(&mut self) {
+        if self.reported {
+            self.sink.clear();
+            self.reported = false;
+        }
+    }
+}
+
+impl Drop for Reporter<'_> {
+    /// Clear on the way out, so an early return or an error cannot leave a
+    /// half-drawn progress line behind.
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// A sink that discards progress, for callers with nothing to draw on.
+pub struct SilentSink;
+
+impl ProgressSink for SilentSink {
+    fn update(&mut self, _progress: Progress) {}
+    fn clear(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What a front-end would have displayed.
+    #[derive(Default)]
+    struct Display {
+        updates: Vec<Progress>,
+        clears: usize,
+    }
+
+    /// A sink sharing its record, so a test can inspect it while the reporter is
+    /// still alive -- which is the only way to check that an update arrives
+    /// *during* the work rather than after it.
+    #[derive(Clone, Default)]
+    struct Recording(Rc<RefCell<Display>>);
+
+    impl Recording {
+        fn updates(&self) -> Vec<Progress> {
+            self.0.borrow().updates.clone()
+        }
+        fn clears(&self) -> usize {
+            self.0.borrow().clears
+        }
+    }
+
+    impl ProgressSink for Recording {
+        fn update(&mut self, progress: Progress) {
+            self.0.borrow_mut().updates.push(progress);
+        }
+        fn clear(&mut self) {
+            self.0.borrow_mut().clears += 1;
+        }
+    }
+
+    fn progress(done: usize) -> Progress {
+        Progress { done, total: 10 }
+    }
+
+    #[test]
+    fn fast_work_says_nothing() {
+        // The common case by far. Any output here would be noise on every single
+        // invocation.
+        let recording = Recording::default();
+        {
+            let mut sink = recording.clone();
+            let mut reporter = Reporter::new(&mut sink);
+            for i in 0..10 {
+                reporter.advance(progress(i));
+            }
+            reporter.finish();
+        }
+        assert!(recording.updates().is_empty());
+        assert_eq!(recording.clears(), 0, "nothing shown, so nothing to clear");
+    }
+
+    #[test]
+    fn slow_work_reports_while_it_is_still_running() {
+        // The point of reporting at all: the message has to arrive during the
+        // wait, not as an epitaph for it.
+        let recording = Recording::default();
+        let mut sink = recording.clone();
+        let mut reporter = Reporter::new(&mut sink);
+        // Pretend the work has already been going a while.
+        reporter.started -= QUIET_PERIOD;
+        reporter.advance(progress(3));
+
+        assert_eq!(
+            recording.updates(),
+            vec![progress(3)],
+            "an update must be emitted before the work ends"
+        );
+    }
+
+    #[test]
+    fn updates_are_rate_limited() {
+        // A large tree would otherwise emit a write per workspace, which can cost
+        // more than the work being measured.
+        let recording = Recording::default();
+        {
+            let mut sink = recording.clone();
+            let mut reporter = Reporter::new(&mut sink);
+            reporter.started -= QUIET_PERIOD;
+            for i in 0..100 {
+                reporter.advance(progress(i));
+            }
+            reporter.finish();
+        }
+        assert_eq!(
+            recording.updates().len(),
+            1,
+            "back-to-back calls must collapse into one update"
+        );
+    }
+
+    #[test]
+    fn a_reported_run_is_cleared() {
+        let recording = Recording::default();
+        {
+            let mut sink = recording.clone();
+            let mut reporter = Reporter::new(&mut sink);
+            reporter.started -= QUIET_PERIOD;
+            reporter.advance(progress(1));
+            reporter.finish();
+        }
+        assert_eq!(recording.clears(), 1);
+    }
+
+    #[test]
+    fn clearing_twice_only_happens_once() {
+        // finish() then drop must not clear twice; a second clear could erase a
+        // line something else has since written.
+        let recording = Recording::default();
+        {
+            let mut sink = recording.clone();
+            let mut reporter = Reporter::new(&mut sink);
+            reporter.started -= QUIET_PERIOD;
+            reporter.advance(progress(1));
+            reporter.finish();
+            reporter.finish();
+        }
+        assert_eq!(recording.clears(), 1);
+    }
+
+    #[test]
+    fn dropping_without_finishing_still_clears() {
+        // An error path must not leave a partial progress line on screen.
+        let recording = Recording::default();
+        {
+            let mut sink = recording.clone();
+            let mut reporter = Reporter::new(&mut sink);
+            reporter.started -= QUIET_PERIOD;
+            reporter.advance(progress(1));
+            // No finish(): simulate an early return.
+        }
+        assert_eq!(recording.clears(), 1);
+    }
+}

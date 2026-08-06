@@ -7,6 +7,7 @@ pub mod error;
 pub mod filter;
 pub mod index;
 pub mod meta;
+pub mod progress;
 pub mod query;
 pub mod scan;
 pub mod signature;

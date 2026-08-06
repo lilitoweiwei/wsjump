@@ -5,6 +5,7 @@ use wsjump_core::config::Config;
 use wsjump_core::create::create_workspace;
 use wsjump_core::error::AppResult;
 use wsjump_core::index::Index;
+use wsjump_core::progress::SilentSink;
 use wsjump_core::workspace::id_for_path;
 
 /// Run the `new` subcommand. All positional args are joined with '-' to form
@@ -29,7 +30,7 @@ pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
 /// bookkeeping failure must not fail the command. Warnings come from the
 /// functions themselves.
 fn record_visit(config: &Config, path: &std::path::Path) {
-    let Ok(index) = Index::open(config) else {
+    let Ok(index) = Index::open(config, &mut SilentSink) else {
         return;
     };
     match id_for_path(&config.workspaces_dir, path) {

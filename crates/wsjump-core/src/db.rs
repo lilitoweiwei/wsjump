@@ -17,6 +17,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row, Transactio
 use time::UtcOffset;
 
 use crate::error::{AppError, AppResult};
+use crate::progress::{Progress, ProgressSink, Reporter};
 use crate::query::{SortOrder, Token};
 use crate::scan::{Discovered, Discovery};
 use crate::signature::{self, MetaSignature};
@@ -331,9 +332,11 @@ impl Db {
         offset: UtcOffset,
         scope: &SyncScope,
         force: bool,
+        sink: &mut dyn ProgressSink,
     ) -> AppResult<SyncOutcome> {
         let stored = self.stored_signatures()?;
         let mut outcome = SyncOutcome::default();
+        let mut reporter = Reporter::new(sink);
 
         // Signatures describe files under a particular root. If that root has
         // moved, they describe files we are no longer looking at, and a matching
@@ -366,11 +369,16 @@ impl Db {
                 )
                 .map_err(|e| sql_err("cannot prepare workspace upsert", e))?;
 
+            let total = found.workspaces.len();
             for entry in &found.workspaces {
                 if !scope.includes(&entry.id) {
                     continue;
                 }
                 outcome.examined += 1;
+                reporter.advance(Progress {
+                    done: outcome.examined,
+                    total,
+                });
 
                 // A workspace absent from the database has no stored signature
                 // to compare, so it is always read.
@@ -421,6 +429,7 @@ impl Db {
 
         tx.commit()
             .map_err(|e| sql_err("cannot commit sync transaction", e))?;
+        reporter.finish();
         Ok(outcome)
     }
 
@@ -699,6 +708,7 @@ fn signature_from_columns(mtime: Option<i64>, size: Option<i64>) -> Option<MetaS
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::progress::SilentSink;
     use std::path::PathBuf;
     use time::{Date, Month};
 
@@ -796,17 +806,22 @@ mod tests {
                 offset(),
                 &SyncScope::Everything,
                 false,
-            )
+            &mut SilentSink,
+        )
         }
 
         /// Sync a discovered tree, comparing signatures.
         fn sync_found(&mut self, found: &Discovery) -> AppResult<SyncOutcome> {
-            self.sync(found, offset(), &SyncScope::Everything, false)
+            self.sync(found, offset(), &SyncScope::Everything, false,
+            &mut SilentSink,
+        )
         }
 
         /// Sync a discovered tree, re-reading every workspace regardless.
         fn sync_forced(&mut self, found: &Discovery) -> AppResult<SyncOutcome> {
-            self.sync(found, offset(), &SyncScope::Everything, true)
+            self.sync(found, offset(), &SyncScope::Everything, true,
+            &mut SilentSink,
+        )
         }
 
         /// Insert rows directly, bypassing discovery.
@@ -1124,6 +1139,7 @@ mod tests {
             offset(),
             &SyncScope::OnlyWorkspace("20260730-alpha".to_string()),
             false,
+            &mut SilentSink,
         )
         .unwrap();
 
@@ -1444,6 +1460,7 @@ mod tests {
             offset(),
             &SyncScope::OnlyWorkspace(id.to_string()),
             false,
+            &mut SilentSink,
         )
         .unwrap();
     }
@@ -1481,6 +1498,7 @@ mod tests {
             offset(),
             &SyncScope::OnlyWorkspace("20260730-alpha".to_string()),
             false,
+            &mut SilentSink,
         )
         .unwrap();
 

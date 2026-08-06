@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
+use wsjump_core::progress::SilentSink;
 use wsjump_core::workspace::id_for_path;
 
 /// Run the `touch` subcommand.
@@ -30,7 +31,7 @@ pub fn run(config: &Config, path: Option<&String>) -> AppResult<()> {
 
     // Opening the index also syncs it, so a workspace created moments ago is
     // already known and can be touched.
-    let index = Index::open(config)?;
+    let index = Index::open(config, &mut SilentSink)?;
     index.record_visit(&id);
     Ok(())
 }
