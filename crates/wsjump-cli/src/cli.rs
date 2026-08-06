@@ -14,6 +14,8 @@ pub enum Command {
     New(Vec<String>),
     /// `touch [<path>]`; no path means the current directory.
     Touch(Option<String>),
+    /// `sync [<path>]`; no path means the whole directory.
+    Sync(Option<String>),
     /// `help` or no arguments at all.
     Help,
 }
@@ -41,6 +43,7 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
         "ls" => Ok(Command::Ls(parse_query(rest)?)),
         "new" => Ok(Command::New(rest.to_vec())),
         "touch" => parse_touch(rest),
+        "sync" => parse_sync(rest),
         "help" => Ok(Command::Help),
         other => Err(AppError::usage(format!("unknown command: {}", other))),
     }
@@ -105,6 +108,20 @@ fn parse_touch(args: &[String]) -> AppResult<Command> {
         _ => Err(AppError::usage(
             "touch takes at most one path".to_string(),
         )),
+    }
+}
+
+/// Parse `sync [<path>]`, which takes at most one path.
+///
+/// Unlike `touch`, no path means the *whole* directory rather than the current
+/// one. The defaults differ deliberately: there is no such thing as touching
+/// every workspace, while touching the current one is the common case; syncing is
+/// the other way round, and `wsjump sync .` covers the rare case.
+fn parse_sync(args: &[String]) -> AppResult<Command> {
+    match args {
+        [] => Ok(Command::Sync(None)),
+        [path] => Ok(Command::Sync(Some(path.clone()))),
+        _ => Err(AppError::usage("sync takes at most one path".to_string())),
     }
 }
 
@@ -220,6 +237,27 @@ mod tests {
     #[test]
     fn touch_rejects_extra_paths() {
         let err = parse_args(&["touch", "one", "two"]).unwrap_err();
+        assert_eq!(err.code, 2);
+    }
+
+    #[test]
+    fn sync_without_a_path_means_everything() {
+        // Deliberately the opposite default from touch: there is no such thing as
+        // touching every workspace, but syncing all of them is the main use.
+        assert!(matches!(parse_args(&["sync"]).unwrap(), Command::Sync(None)));
+    }
+
+    #[test]
+    fn sync_takes_a_path() {
+        match parse_args(&["sync", "."]).unwrap() {
+            Command::Sync(Some(path)) => assert_eq!(path, "."),
+            _ => panic!("expected sync with a path"),
+        }
+    }
+
+    #[test]
+    fn sync_rejects_extra_paths() {
+        let err = parse_args(&["sync", "one", "two"]).unwrap_err();
         assert_eq!(err.code, 2);
     }
 

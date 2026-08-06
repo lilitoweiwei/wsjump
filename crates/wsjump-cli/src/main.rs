@@ -36,5 +36,6 @@ fn run(args: &[String]) -> AppResult<()> {
         Command::Ls(query) => cmd::ls::run(&Config::load()?, &query),
         Command::New(slug) => cmd::new::run(&Config::load()?, &slug),
         Command::Touch(path) => cmd::touch::run(&Config::load()?, path.as_ref()),
+        Command::Sync(path) => cmd::sync::run(&Config::load()?, path.as_ref()),
     }
 }

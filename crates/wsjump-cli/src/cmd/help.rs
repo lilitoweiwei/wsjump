@@ -14,6 +14,7 @@ COMMANDS:
     ls [options] <query...>    Print one absolute path per matching workspace.
     new <slug...>              Create a new workspace (YYYYMMDD[-slug]) and print its path.
     touch [<path>]             Record a visit to a workspace (default: current directory).
+    sync [<path>]              Re-read workspace metadata (default: all workspaces).
     help                       Show this help.
 
 OPTIONS:
@@ -29,7 +30,13 @@ QUERY:
     matches all workspaces.
 
     The date prefix and the description are not searched, so finding a
-    workspace never requires typing a date.";
+    workspace never requires typing a date.
+
+SYNC:
+    The index keeps itself up to date, re-reading only metadata files whose
+    size or timestamp changed, so 'sync' is rarely needed. Run it if a
+    workspace's tags or description look stale despite the file being
+    correct on disk.";
 
 /// Print usage to stdout and succeed.
 pub fn run() -> AppResult<()> {
