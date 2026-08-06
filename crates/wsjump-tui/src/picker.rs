@@ -12,7 +12,7 @@ use tui_input::backend::crossterm::EventHandler;
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
-use wsjump_core::progress::SilentSink;
+use wsjump_core::progress::StderrProgress;
 
 use crate::app::App;
 use crate::render;
@@ -38,7 +38,9 @@ pub fn run() -> AppResult<Outcome> {
     // session rather than per query: re-syncing on every keystroke would tie
     // typing latency to the number of workspaces, and the directory is very
     // unlikely to change during a session lasting seconds.
-    let index = Index::open(&config, &mut SilentSink)?;
+    // The sync runs before the terminal enters raw mode, so a slow sync can
+    // show its single stderr line and erase it again before the picker draws.
+    let index = Index::open(&config, &mut StderrProgress::new())?;
     let mut app = App::new(index, config.default_sort())?;
 
     let mut terminal = setup_terminal()?;

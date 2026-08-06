@@ -7,7 +7,7 @@ use wsjump_core::index::Index;
 use wsjump_core::query;
 
 use crate::cli::Query;
-use crate::progress::StderrProgress;
+use wsjump_core::progress::StderrProgress;
 
 /// Run the `ls` subcommand. An empty query lists all workspaces; an empty
 /// result set is normal and exits successfully with no output.

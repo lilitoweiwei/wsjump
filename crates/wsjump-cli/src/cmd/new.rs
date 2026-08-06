@@ -5,8 +5,8 @@ use wsjump_core::config::Config;
 use wsjump_core::create::create_workspace;
 use wsjump_core::error::AppResult;
 use wsjump_core::index::Index;
+use wsjump_core::progress::StderrProgress;
 use wsjump_core::workspace::id_for_path;
-use crate::progress::StderrProgress;
 
 /// Run the `new` subcommand. All positional args are joined with '-' to form
 /// the slug (empty if none); creation and dating live in core.

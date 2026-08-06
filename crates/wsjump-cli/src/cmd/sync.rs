@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
+use wsjump_core::progress::StderrProgress;
 use wsjump_core::workspace::id_for_possibly_missing_path;
-use crate::progress::StderrProgress;
 
 /// Run the `sync` subcommand.
 ///
