@@ -16,6 +16,8 @@ pub enum Command {
     Touch(Option<String>),
     /// `sync [<path>]`; no path means the whole directory.
     Sync(Option<String>),
+    /// `tags [--sort=<order>]`; no sort means the configured default.
+    Tags(Option<SortOrder>),
     /// `help` or no arguments at all.
     Help,
 }
@@ -44,6 +46,7 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
         "new" => Ok(Command::New(rest.to_vec())),
         "touch" => parse_touch(rest),
         "sync" => parse_sync(rest),
+        "tags" => parse_tags(rest),
         "help" => Ok(Command::Help),
         other => Err(AppError::usage(format!("unknown command: {}", other))),
     }
@@ -123,6 +126,33 @@ fn parse_sync(args: &[String]) -> AppResult<Command> {
         [path] => Ok(Command::Sync(Some(path.clone()))),
         _ => Err(AppError::usage("sync takes at most one path".to_string())),
     }
+}
+
+/// Parse `tags [--sort=<order>]`, which takes no positional arguments.
+fn parse_tags(args: &[String]) -> AppResult<Command> {
+    let mut sort = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            _ if arg.starts_with("--sort=") => {
+                let value = arg.trim_start_matches("--sort=");
+                sort = Some(parse_sort(value)?);
+            }
+            "--sort" => {
+                let value = iter.next().ok_or_else(|| {
+                    AppError::usage("--sort requires a value: id or recency".to_string())
+                })?;
+                sort = Some(parse_sort(value)?);
+            }
+            _ => {
+                return Err(AppError::usage(format!(
+                    "unexpected argument for tags: {}",
+                    arg
+                )));
+            }
+        }
+    }
+    Ok(Command::Tags(sort))
 }
 
 #[cfg(test)]
@@ -267,5 +297,24 @@ mod tests {
             Command::New(args) => assert_eq!(args, vec!["my".to_string(), "slug".to_string()]),
             _ => panic!("expected new"),
         }
+    }
+
+    #[test]
+    fn tags_without_arguments_uses_the_default_order() {
+        assert!(matches!(parse_args(&["tags"]).unwrap(), Command::Tags(None)));
+    }
+
+    #[test]
+    fn tags_accepts_a_sort_order() {
+        match parse_args(&["tags", "--sort", "id"]).unwrap() {
+            Command::Tags(Some(SortOrder::Id)) => {}
+            _ => panic!("expected tags with id sort"),
+        }
+    }
+
+    #[test]
+    fn tags_rejects_positional_arguments() {
+        let err = parse_args(&["tags", "rust"]).unwrap_err();
+        assert_eq!(err.code, 2);
     }
 }

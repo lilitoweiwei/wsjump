@@ -1,10 +1,13 @@
 //! Workspace data model and directory-name parsing.
 
+use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::error::{AppError, AppResult};
+use crate::query::SortOrder;
 
 /// A single workspace, either discovered on disk or read back from the database.
 #[derive(Clone)]
@@ -55,6 +58,34 @@ impl Workspace {
 /// [`Workspace::tags_joined`]. Empty input yields no tags.
 pub fn split_tags(joined: &str) -> Vec<String> {
     joined.split_whitespace().map(str::to_string).collect()
+}
+
+/// The distinct tags across `workspaces`, ordered by `order`.
+///
+/// `Recency` preserves first-seen order, which is recency only if the caller
+/// has already sorted `workspaces` by recency; `Id` is alphabetical by tag
+/// name. Either way each tag appears exactly once.
+pub fn all_tags(workspaces: &[Workspace], order: SortOrder) -> Vec<String> {
+    match order {
+        SortOrder::Recency => {
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut tags = Vec::new();
+            for ws in workspaces {
+                for tag in &ws.tags {
+                    if seen.insert(tag.as_str()) {
+                        tags.push(tag.clone());
+                    }
+                }
+            }
+            tags
+        }
+        SortOrder::Id => workspaces
+            .iter()
+            .flat_map(|ws| ws.tags.iter().cloned())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// Current time as unix seconds; the timestamp written by an access record.
@@ -369,5 +400,47 @@ mod tests {
             None,
             "the parent is gone too, so there is nothing to resolve against"
         );
+    }
+
+    /// A workspace created on 2026-07-30 with the given slug and tags.
+    fn ws(slug: &str, tags: &[&str]) -> Workspace {
+        Workspace {
+            id: format!("20260730-{}", slug),
+            date: Date::from_calendar_date(2026, Month::July, 30).unwrap(),
+            slug: slug.to_string(),
+            path: PathBuf::from(format!("G:/ws/w/20260730-{}", slug)),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            desc: String::new(),
+            last_access: None,
+        }
+    }
+
+    #[test]
+    fn all_tags_recency_keeps_first_seen_order_and_dedups() {
+        // Order is whatever the caller already imposed, here recency; the point
+        // is that the first workspace to carry a tag wins, and repeats are gone.
+        let workspaces = [
+            ws("alpha", &["rust", "tool"]),
+            ws("beta", &["tool", "db"]),
+            ws("gamma", &["rust"]),
+        ];
+        assert_eq!(
+            all_tags(&workspaces, SortOrder::Recency),
+            vec!["rust".to_string(), "tool".to_string(), "db".to_string()]
+        );
+    }
+
+    #[test]
+    fn all_tags_id_is_alphabetical_and_deduped() {
+        let workspaces = [ws("alpha", &["rust", "tool"]), ws("beta", &["tool", "db"])];
+        assert_eq!(
+            all_tags(&workspaces, SortOrder::Id),
+            vec!["db".to_string(), "rust".to_string(), "tool".to_string()]
+        );
+    }
+
+    #[test]
+    fn all_tags_with_no_tags_is_empty() {
+        assert!(all_tags(&[ws("alpha", &[])], SortOrder::Id).is_empty());
     }
 }

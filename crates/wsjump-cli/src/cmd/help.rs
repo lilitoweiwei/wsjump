@@ -15,11 +15,12 @@ COMMANDS:
     new <slug...>              Create a new workspace (YYYYMMDD[-slug]) and print its path.
     touch [<path>]             Record a visit to a workspace (default: current directory).
     sync [<path>]              Re-read workspace metadata (default: all workspaces).
+    tags [--sort=<order>]      Print every distinct tag, space-separated.
     help                       Show this help.
 
 OPTIONS:
     --sort=<order>    Result order: 'recency' (most recently visited first) or
-                      'id' (by directory name). Defaults to the configured
+                      'id' (alphabetical). Defaults to the configured
                       default_sort, or recency.
     --                End of options; later dashed arguments are query tokens.
 
