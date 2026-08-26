@@ -1,14 +1,18 @@
 //! Configuration file location and parsing.
 //!
-//! `wsjump` reads a TOML config placed next to the executable. The path is
-//! resolved via `current_exe()`, which on Windows returns the invoked path
-//! (e.g. the symlink in `bin/`) WITHOUT resolving symlinks / junctions to the
-//! real binary in `target/<profile>/`. The config therefore lives next to the
-//! invoked binary in `bin/`. It tells the tool where `w/` lives and which fixed
-//! UTC offset to use for date generation / parsing.
+//! `wsjump` reads a TOML config placed next to the executable. The install
+//! directory is where the config (and by default the database) lives:
 //!
-//! Optional keys (`db_file`, `default_sort`) have defaults and are read through
-//! accessors rather than public fields, so callers never handle the `Option`.
+//! - On Windows `current_exe()` reports the *invoked* path (e.g. the symlink
+//!   in `bin/`) without resolving junctions to the real binary in
+//!   `target/<profile>/`, so the install dir is simply the exe's parent.
+//! - On POSIX the kernel has already resolved the symlink by the time the
+//!   process starts, so `current_exe()` points at the real binary and the
+//!   spelled install dir is searched for instead: first via `argv[0]` when it
+//!   carries a directory part, then across `$PATH` entries whose `wsjump` /
+//!   `wsjump-tui` canonicalises back to this binary (a symlink-in-PATH
+//!   deployment such as `~/ws/bin`). The first candidate containing
+//!   `wsjump.toml` wins.
 
 use std::fs;
 use std::path::PathBuf;
@@ -69,11 +73,11 @@ impl Config {
     }
 
     /// Resolve the database path: the configured `db_file`, else `wsjump.db`
-    /// beside the executable (i.e. next to the config file).
+    /// in the install directory (where the config lives).
     pub fn db_file(&self) -> AppResult<PathBuf> {
         match &self.db_file {
             Some(path) => Ok(path.clone()),
-            None => Ok(exe_dir()?.join(DB_FILE_NAME)),
+            None => Ok(install_dir()?.join(DB_FILE_NAME)),
         }
     }
 
@@ -110,18 +114,69 @@ impl Config {
     }
 }
 
-/// Resolve the expected path of the config file: `<exe dir>/wsjump.toml`.
+/// Resolve the expected path of the config file: `<install dir>/wsjump.toml`.
 fn config_path() -> AppResult<PathBuf> {
-    Ok(exe_dir()?.join(CONFIG_FILE_NAME))
+    Ok(install_dir()?.join(CONFIG_FILE_NAME))
 }
 
-/// Directory holding the invoked executable (see the module comment on why
-/// this is `bin/` rather than `target/<profile>/`).
-fn exe_dir() -> AppResult<PathBuf> {
+/// The install directory: where `wsjump.toml` lives (see the module comment
+/// for how it is located on each platform).
+fn install_dir() -> AppResult<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
     let exe = std::env::current_exe()
         .map_err(|e| AppError::runtime(format!("cannot locate current executable: {}", e)))?;
-    let dir = exe.parent().ok_or_else(|| {
-        AppError::runtime("current executable has no parent directory".to_string())
-    })?;
-    Ok(dir.to_path_buf())
+    push_unique(&mut candidates, exe.parent());
+
+    // argv[0] keeps the *spelled* path, the only place a POSIX symlink
+    // deployment (e.g. running `~/ws/bin/wsjump` directly) still shows up.
+    if let Some(spelled) = std::env::args().next() {
+        let p = PathBuf::from(&spelled);
+        if p.components().count() > 1 {
+            push_unique(&mut candidates, p.parent());
+        }
+    }
+
+    // A bare `wsjump` on the PATH reached us through a symlink; scan PATH for
+    // entries whose `wsjump` / `wsjump-tui` resolves back to this binary.
+    let exe_real = exe.canonicalize().unwrap_or_else(|_| exe.clone());
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for name in ["wsjump", "wsjump-tui"] {
+                let cand = dir.join(name);
+                if let Ok(real) = cand.canonicalize() {
+                    if real == exe_real {
+                        push_unique(&mut candidates, Some(&dir));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for dir in &candidates {
+        if dir.join(CONFIG_FILE_NAME).exists() {
+            return Ok(dir.clone());
+        }
+    }
+
+    let looked = candidates
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(AppError::runtime(format!(
+        "no {} found next to the executable (looked in: {})",
+        CONFIG_FILE_NAME, looked
+    )))
+}
+
+/// Append `dir` to `out` unless it is missing or already present.
+fn push_unique(out: &mut Vec<PathBuf>, dir: Option<&std::path::Path>) {
+    if let Some(dir) = dir {
+        let dir = dir.to_path_buf();
+        if !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
 }

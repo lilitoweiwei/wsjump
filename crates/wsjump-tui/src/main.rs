@@ -33,8 +33,8 @@ fn main() -> ExitCode {
 /// stdout, so the shell function knows not to jump.
 fn run(args: &[String]) -> AppResult<ExitCode> {
     match cli::parse(args)? {
-        Command::Init => {
-            init::run()?;
+        Command::Init(shell) => {
+            init::run(shell)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Picker => match picker::run()? {

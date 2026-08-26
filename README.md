@@ -19,9 +19,9 @@ wsjump 是 Cargo workspace，产出两个可执行文件，各司其职：
 ## 快速上手
 
 1. 编译（见「安装 → 编译」）。
-2. 把 `wsjump.exe`、`wsjump-tui.exe` 复制到一个稳定的目录（如 `G:/ws/bin`），并在**同一目录**写好 `wsjump.toml`（见「安装 → 配置」）。
+2. 把 `wsjump`、`wsjump-tui`（Windows 下为 `wsjump.exe`、`wsjump-tui.exe`）复制到一个稳定的目录（如 `G:/ws/bin`），并在**同一目录**写好 `wsjump.toml`（见「安装 → 配置」）。
 3. 把该目录加入 `PATH`。
-4. 在 PowerShell profile 里加一行 shell 集成（见「安装 → shell 集成」）。
+4. 按「安装 → shell 集成」给你的 shell 加一行集成（Windows 用 PowerShell profile，Linux 用 `~/.bashrc`）。
 5. 重开终端，输入 `ju` 即可交互式跳转；输入 `wsjump help` 查看查询指令。
 
 ## 安装
@@ -66,15 +66,21 @@ utc_offset_hours = 8
 
 ### shell 集成
 
-`wsjump-tui init` 会输出一段 PowerShell 集成片段（含安装说明与 `ju` 函数定义）。安装方式是把它加进你的 PowerShell profile（`notepad $PROFILE` 打开）：
+`wsjump-tui init [<shell>]` 会输出一段集成片段（含安装说明与 `ju` 函数定义），`<shell>` 取 `powershell`（缺省）或 `bash`。片段同时是安装指南：注释部分在 eval 时是无害的，`ju` 函数定义则会被生效。安装后得到 `ju` 函数，可以交互式进行目录跳转，具体使用方法请执行 `ju --help` 来查阅。
+
+**Windows / PowerShell**：把输出加进你的 PowerShell profile（`notepad $PROFILE` 打开）：
 
 ```powershell
 Invoke-Expression (& wsjump-tui init | Out-String)
 ```
 
-安装后得到 `ju` 函数，可以交互式进行目录跳转，具体使用方法请执行 `ju --help`来查阅。
+**Linux / bash**：先把 `wsjump`、`wsjump-tui` 和 `wsjump.toml` 放进一个已在 `PATH` 里的用户目录（例如 `~/bin`），再把输出加进 `~/.bashrc`：
 
-升级 wsjump-tui 后重新执行上面的 INSTALL 行即可让函数保持同步；卸载即从 profile 里删掉那一行。
+```bash
+eval "$(wsjump-tui init bash)"
+```
+
+升级 wsjump-tui 后重新执行上面的 INSTALL 行即可让函数保持同步；卸载即从 profile / `~/.bashrc` 里删掉那一行。
 
 ## 工作区结构约定
 
@@ -138,7 +144,7 @@ wsjump 用一个 SQLite 数据库（默认是和二进制文件同目录的 `wsj
     crates/
       wsjump-core/    lib：全部业务逻辑（CLI 与 TUI 共享）
       wsjump-cli/     bin：产物 wsjump(.exe)，argv 分发 + 子命令
-      wsjump-tui/     bin：产物 wsjump-tui(.exe)，交互选择器 + init
+      wsjump-tui/     bin：产物 wsjump-tui(.exe)，交互选择器 + shell init
   ```
 
 ### 编译与测试
@@ -150,4 +156,4 @@ cargo test              # 测试（core / cli 的单元测试；tui 的分页与
 
 ### 平台
 
-当前以 **Windows / PowerShell** 为主平台；跨平台（bash / zsh / fish 集成、Linux 终端行为实测）在待办中。
+当前以 **Windows / PowerShell** 为主平台；bash（Linux）集成已可用；zsh / fish 集成在待办中。
