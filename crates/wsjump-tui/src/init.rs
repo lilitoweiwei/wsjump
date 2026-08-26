@@ -101,12 +101,18 @@ const BASH_SNIPPET: &str = r#"# ================================================
 # and jumps to the chosen workspace; a command word runs the matching `wsjump`
 # command instead. Single letters and full names both work.
 ju() {
-    local dir
+    local dir tmp
     if [ "$#" -eq 0 ]; then
-        # Launch the interactive picker; it draws its UI on stderr and prints
-        # the chosen workspace path on stdout. Jump only when a path returned.
-        dir="$(wsjump-tui)" || return 1
-        [ -n "$dir" ] && cd -- "$dir"
+        # The picker must keep stdout on the terminal: the inline viewport's
+        # cursor query (ESC [ 6 n) is answered only while stdout reaches the
+        # terminal, and a command substitution would pipe it away. The chosen
+        # path is written to a temp file instead.
+        tmp="$(mktemp)" || return 1
+        if wsjump-tui --output "$tmp"; then
+            dir="$(cat "$tmp")"
+            [ -n "$dir" ] && cd -- "$dir"
+        fi
+        rm -f "$tmp"
         return
     fi
 

@@ -1,15 +1,19 @@
 //! Argv parsing for the TUI binary.
 //!
-//! The TUI binary has a tiny surface: no arguments launches the interactive
-//! picker, `init [<shell>]` prints the shell-integration snippet.
+//! The TUI binary has a tiny surface: no arguments (or `--output <file>`)
+//! launches the interactive picker, `init [<shell>]` prints the
+//! shell-integration snippet.
+
+use std::path::PathBuf;
 
 use wsjump_core::error::{AppError, AppResult};
 
 /// What the TUI binary was asked to do.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Launch the interactive picker (no arguments).
-    Picker,
+    /// Launch the interactive picker; the chosen path goes to stdout unless
+    /// `--output` names a file.
+    Picker(Option<PathBuf>),
     /// Print the shell-integration snippet for the given shell.
     Init(Shell),
 }
@@ -42,12 +46,13 @@ impl Shell {
 
 /// Parse process arguments (excluding argv[0]).
 ///
-/// No arguments -> `Picker`. `init` -> `Init(Powershell)` (kept for backwards
-/// compatibility with the original Windows-centric invocation); `init <shell>`
-/// -> `Init(shell)`. Anything else is a usage error.
+/// No arguments -> `Picker(None)`. `--output <file>` / `--output=<file>` ->
+/// `Picker(Some(file))`. `init` -> `Init(Powershell)` (kept for backwards
+/// compatibility with the original Windows-centric invocation);
+/// `init <shell>` -> `Init(shell)`. Anything else is a usage error.
 pub fn parse(args: &[String]) -> AppResult<Command> {
     match args.split_first() {
-        None => Ok(Command::Picker),
+        None => Ok(Command::Picker(None)),
         Some((cmd, rest)) if cmd == "init" => match rest {
             [] => Ok(Command::Init(Shell::Powershell)),
             [name] => Shell::parse(name).map(Command::Init).ok_or_else(|| {
@@ -66,6 +71,22 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
                 "init takes at most one argument: the shell",
             )),
         },
+        Some((flag, rest)) if flag == "--output" => match rest {
+            [path] if !path.is_empty() => Ok(Command::Picker(Some(PathBuf::from(path)))),
+            _ => Err(AppError::usage(
+                "--output takes exactly one argument: the file path",
+            )),
+        },
+        Some((flag, _)) if flag.starts_with("--output=") => {
+            let path = &flag["--output=".len()..];
+            if path.is_empty() {
+                Err(AppError::usage(
+                    "--output takes exactly one argument: the file path",
+                ))
+            } else {
+                Ok(Command::Picker(Some(PathBuf::from(path))))
+            }
+        }
         Some((other, _)) => Err(AppError::usage(format!("unknown command: {}", other))),
     }
 }
@@ -80,7 +101,29 @@ mod tests {
 
     #[test]
     fn no_arguments_launches_the_picker() {
-        assert!(matches!(parse(&args(&[])), Ok(Command::Picker)));
+        assert_eq!(parse(&args(&[])).unwrap(), Command::Picker(None));
+    }
+
+    #[test]
+    fn output_flag_names_the_selection_file() {
+        assert_eq!(
+            parse(&args(&["--output", "/tmp/pick.txt"])).unwrap(),
+            Command::Picker(Some(PathBuf::from("/tmp/pick.txt")))
+        );
+    }
+
+    #[test]
+    fn output_equals_form_is_accepted() {
+        assert_eq!(
+            parse(&args(&["--output=/tmp/pick.txt"])).unwrap(),
+            Command::Picker(Some(PathBuf::from("/tmp/pick.txt")))
+        );
+    }
+
+    #[test]
+    fn output_requires_a_path_argument() {
+        assert!(parse(&args(&["--output"])).is_err());
+        assert!(parse(&args(&["--output="])).is_err());
     }
 
     #[test]
