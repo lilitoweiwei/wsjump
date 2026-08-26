@@ -54,6 +54,8 @@ root_dir = "G:/ws"
 
 `root_dir` 必须是绝对路径。配置不接受未知项；旧的 `workspaces_dir`、`utc_offset_hours` 和 `id` 排序不再支持。
 
+配置和默认的 `wsjump.db` 都放在**安装目录**里，即 `wsjump.toml` 所在目录。Windows 下安装目录就是可执行文件所在目录；Linux 下程序会依次尝试「`argv[0]` 的目录 → `PATH` 中指向本源代码树的目录 → 真实二进制所在目录」。因此在 `~/bin` 里放两个指向 `target/release/` 的符号链接、再把 `wsjump.toml` 放在 `~/bin`，同样能正常找到配置。判定细节见 `crates/wsjump-core/src/config.rs` 的 `install_dir` 注释。
+
 ### PowerShell 集成
 
 在 PowerShell profile 中加入：
@@ -74,6 +76,16 @@ ju --help                       # 查看 shell 集成帮助
 ```
 
 `new`、`touch`、`sync` 也可缩写为 `n`、`t`、`s`。集成会把程序返回的绝对路径交给 `Set-Location`。程序的 UI、告警、同步进度写入 stderr，stdout 留给路径结果。
+
+### Linux（bash）集成
+
+把 `wsjump`、`wsjump-tui` 和 `wsjump.toml` 放进一个已在 `PATH` 里的目录（例如 `~/bin`），再把集成片段加进 `~/.bashrc`：
+
+```bash
+eval "$(wsjump-tui init bash)"
+```
+
+`init` 不带参数时输出 PowerShell 片段，Linux 上必须显式写 `bash`。重开终端（或 `source ~/.bashrc`）后 `ju` 的用法与上面一致，选中的路径交给 `cd`。升级程序后重新执行上面这一行（或重新 `source`）即可让函数保持同步；卸载就是从 `~/.bashrc` 里删掉它。
 
 ### 从旧版升级
 
