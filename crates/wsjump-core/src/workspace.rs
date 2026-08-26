@@ -1,6 +1,7 @@
 //! Workspace identity, tags, ordering and path ownership.
 
 use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -163,14 +164,62 @@ fn key_under(root: &Path, target: &Path) -> Option<String> {
 }
 
 /// Canonicalize a path with a useful runtime error on failure.
+///
+/// The platforms disagree on what "resolving" a path means. Windows folds `.`
+/// and `..` lexically while looking the path up, so `ws/./gone/..` resolves as
+/// long as `ws` exists. POSIX resolves one component at a time, so the same
+/// spelling fails with ENOENT purely because `gone` is absent -- even though
+/// the path *names* an existing directory.
+///
+/// When `canonicalize` fails, the missing tail is therefore folded lexically
+/// onto the deepest ancestor that does resolve, and the folded result must
+/// itself canonicalize: a path that really is missing still errors instead of
+/// being silently invented.
 fn canonical(path: &Path) -> AppResult<PathBuf> {
-    path.canonicalize().map_err(|error| {
-        AppError::runtime(format!(
-            "cannot resolve path '{}': {}",
-            path.display(),
-            error
-        ))
-    })
+    if let Ok(real) = path.canonicalize() {
+        return Ok(real);
+    }
+
+    // Peel components until one resolves, keeping the peeled tail so it can be
+    // re-attached in order.
+    let mut tail: Vec<&OsStr> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if let Ok(real) = ancestor.canonicalize() {
+            let mut folded = real;
+            for &seg in tail.iter().rev() {
+                if seg == OsStr::new("..") {
+                    folded.pop();
+                } else if seg != OsStr::new(".") {
+                    folded.push(seg);
+                }
+            }
+            return folded.canonicalize().map_err(|error| {
+                AppError::runtime(format!(
+                    "cannot resolve path '{}': {}",
+                    path.display(),
+                    error
+                ))
+            });
+        }
+        match (ancestor.file_name(), ancestor.parent()) {
+            (Some(seg), Some(parent)) => {
+                tail.push(seg);
+                ancestor = parent;
+            }
+            // A trailing `..` has no file name; peel it explicitly.
+            (None, Some(parent)) if ancestor.ends_with("..") => {
+                tail.push(OsStr::new(".."));
+                ancestor = parent;
+            }
+            _ => break,
+        }
+    }
+
+    Err(AppError::runtime(format!(
+        "cannot resolve path '{}': no existing ancestor",
+        path.display()
+    )))
 }
 
 /// Convert a filesystem timestamp to Unix seconds, including pre-epoch times.
@@ -257,6 +306,28 @@ mod tests {
             key_for_possibly_missing_path(&tree.root, &nested).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn spellings_through_missing_segments_still_resolve_on_posix() {
+        // `w/gone/../scratch` names an existing directory, but POSIX path
+        // resolution fails on `gone` before it ever folds the `..`. The fold in
+        // `canonical` recovers the intended path; a genuinely missing one must
+        // still error rather than be invented.
+        let tree = TempTree::new("fold");
+        tree.dir("w/scratch");
+        let spelled = tree.root.join("w/gone/../scratch");
+        assert_eq!(
+            key_for_path(&tree.root, &spelled).unwrap().as_deref(),
+            Some("w/scratch")
+        );
+        tree.dir("w/scratch/inner");
+        let deeper = tree.root.join("w/gone/../scratch/./inner/../");
+        assert_eq!(
+            key_for_path(&tree.root, &deeper).unwrap().as_deref(),
+            Some("w/scratch")
+        );
+        assert!(key_for_path(&tree.root, &tree.root.join("w/gone")).is_err());
     }
 
     #[test]
