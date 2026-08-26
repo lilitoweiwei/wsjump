@@ -131,7 +131,10 @@ mod tests {
             workspace("alpha", &["rust", "tool"]),
             workspace("beta", &["rust"]),
         ];
-        assert_eq!(kept(&all, ":rust :tool"), vec!["20260730-alpha".to_string()]);
+        assert_eq!(
+            kept(&all, ":rust :tool"),
+            vec!["20260730-alpha".to_string()]
+        );
     }
 
     #[test]

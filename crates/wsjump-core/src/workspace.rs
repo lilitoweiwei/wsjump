@@ -431,7 +431,10 @@ mod tests {
     fn a_deleted_path_with_an_invalid_name_is_no_workspace() {
         let root = TempRoot::new("sync-bad-name");
         let bad = root.path.join("notaworkspace");
-        assert_eq!(id_for_possibly_missing_path(&root.path, &bad).unwrap(), None);
+        assert_eq!(
+            id_for_possibly_missing_path(&root.path, &bad).unwrap(),
+            None
+        );
     }
 
     #[test]

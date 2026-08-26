@@ -41,7 +41,8 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
     if app.loaded_count() == 0 {
         frame.render_widget(
-            Paragraph::new("no matching workspace").style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new("no matching workspace")
+                .style(Style::default().add_modifier(Modifier::DIM)),
             area,
         );
         return;

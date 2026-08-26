@@ -96,8 +96,11 @@ impl Index {
                 );
                 // Only now is the metadata of every workspace needed, since
                 // there is no index to answer from.
-                let mut workspaces: Vec<Workspace> =
-                    found.workspaces.iter().map(scan::Discovered::load).collect();
+                let mut workspaces: Vec<Workspace> = found
+                    .workspaces
+                    .iter()
+                    .map(scan::Discovered::load)
+                    .collect();
                 sort_by_id(&mut workspaces);
                 Ok((Index::Degraded(workspaces), SyncOutcome::default()))
             }
@@ -274,9 +277,7 @@ mod tests {
         let mut ids = Vec::new();
         let mut cursor = None;
         loop {
-            let page = index
-                .query(&[], SortOrder::Id, 2, cursor.as_ref())
-                .unwrap();
+            let page = index.query(&[], SortOrder::Id, 2, cursor.as_ref()).unwrap();
             ids.extend(page.workspaces.iter().map(|ws| ws.id.clone()));
             match page.next {
                 Some(next) => cursor = Some(next),

@@ -317,9 +317,15 @@ mod tests {
     #[test]
     fn selected_path_follows_the_highlight() {
         let mut app = app_with(3);
-        assert_eq!(app.take_selected().unwrap(), workspace("a").path.display().to_string());
+        assert_eq!(
+            app.take_selected().unwrap(),
+            workspace("a").path.display().to_string()
+        );
         app.select_next().expect("select next");
-        assert_eq!(app.take_selected().unwrap(), workspace("b").path.display().to_string());
+        assert_eq!(
+            app.take_selected().unwrap(),
+            workspace("b").path.display().to_string()
+        );
     }
 
     #[test]
@@ -349,8 +355,8 @@ mod tests {
     fn recency_is_refused_without_a_database() {
         // Falling back silently would label the list 'recency' while showing name
         // order.
-        let app = App::new(Index::Degraded(vec![workspace("a")]), SortOrder::Recency)
-            .expect("build app");
+        let app =
+            App::new(Index::Degraded(vec![workspace("a")]), SortOrder::Recency).expect("build app");
         assert!(!app.can_sort_by_recency());
         assert_eq!(app.sort(), SortOrder::Id);
     }

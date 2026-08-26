@@ -23,13 +23,14 @@ pub fn run(config: &Config, path: Option<&String>) -> AppResult<()> {
             let target = PathBuf::from(path);
             // Deliberately tolerant of a missing directory: "I deleted this
             // workspace, update the index" is a normal reason to run this.
-            let id = id_for_possibly_missing_path(&config.workspaces_dir, &target)?
-                .ok_or_else(|| {
+            let id = id_for_possibly_missing_path(&config.workspaces_dir, &target)?.ok_or_else(
+                || {
                     AppError::usage(format!(
                         "'{}' does not name a workspace under the workspaces directory",
                         target.display()
                     ))
-                })?;
+                },
+            )?;
             Index::open_syncing_only(config, &id, &mut StderrProgress::new())?
         }
         None => Index::open_forcing_sync(config, &mut StderrProgress::new())?,

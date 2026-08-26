@@ -108,9 +108,7 @@ fn parse_touch(args: &[String]) -> AppResult<Command> {
     match args {
         [] => Ok(Command::Touch(None)),
         [path] => Ok(Command::Touch(Some(path.clone()))),
-        _ => Err(AppError::usage(
-            "touch takes at most one path".to_string(),
-        )),
+        _ => Err(AppError::usage("touch takes at most one path".to_string())),
     }
 }
 
@@ -188,7 +186,10 @@ mod tests {
     fn query_tokens_are_collected() {
         let query = ls_query(&["ls", "alpha", ":tag"]);
         assert_eq!(query.tokens, vec!["alpha".to_string(), ":tag".to_string()]);
-        assert!(query.sort.is_none(), "no --sort means use the configured default");
+        assert!(
+            query.sort.is_none(),
+            "no --sort means use the configured default"
+        );
     }
 
     #[test]
@@ -207,7 +208,10 @@ mod tests {
 
     #[test]
     fn sort_accepts_recency() {
-        assert_eq!(ls_query(&["ls", "--sort=recency"]).sort, Some(SortOrder::Recency));
+        assert_eq!(
+            ls_query(&["ls", "--sort=recency"]).sort,
+            Some(SortOrder::Recency)
+        );
     }
 
     #[test]
@@ -274,7 +278,10 @@ mod tests {
     fn sync_without_a_path_means_everything() {
         // Deliberately the opposite default from touch: there is no such thing as
         // touching every workspace, but syncing all of them is the main use.
-        assert!(matches!(parse_args(&["sync"]).unwrap(), Command::Sync(None)));
+        assert!(matches!(
+            parse_args(&["sync"]).unwrap(),
+            Command::Sync(None)
+        ));
     }
 
     #[test]
@@ -301,7 +308,10 @@ mod tests {
 
     #[test]
     fn tags_without_arguments_uses_the_default_order() {
-        assert!(matches!(parse_args(&["tags"]).unwrap(), Command::Tags(None)));
+        assert!(matches!(
+            parse_args(&["tags"]).unwrap(),
+            Command::Tags(None)
+        ));
     }
 
     #[test]

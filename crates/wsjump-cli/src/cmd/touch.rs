@@ -23,10 +23,7 @@ pub fn run(config: &Config, path: Option<&String>) -> AppResult<()> {
     };
 
     let id = id_for_path(&config.workspaces_dir, &target)?.ok_or_else(|| {
-        AppError::runtime(format!(
-            "'{}' is not inside a workspace",
-            target.display()
-        ))
+        AppError::runtime(format!("'{}' is not inside a workspace", target.display()))
     })?;
 
     // Opening the index also syncs it, so a workspace created moments ago is

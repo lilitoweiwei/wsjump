@@ -806,22 +806,30 @@ mod tests {
                 offset(),
                 &SyncScope::Everything,
                 false,
-            &mut SilentSink,
-        )
+                &mut SilentSink,
+            )
         }
 
         /// Sync a discovered tree, comparing signatures.
         fn sync_found(&mut self, found: &Discovery) -> AppResult<SyncOutcome> {
-            self.sync(found, offset(), &SyncScope::Everything, false,
-            &mut SilentSink,
-        )
+            self.sync(
+                found,
+                offset(),
+                &SyncScope::Everything,
+                false,
+                &mut SilentSink,
+            )
         }
 
         /// Sync a discovered tree, re-reading every workspace regardless.
         fn sync_forced(&mut self, found: &Discovery) -> AppResult<SyncOutcome> {
-            self.sync(found, offset(), &SyncScope::Everything, true,
-            &mut SilentSink,
-        )
+            self.sync(
+                found,
+                offset(),
+                &SyncScope::Everything,
+                true,
+                &mut SilentSink,
+            )
         }
 
         /// Insert rows directly, bypassing discovery.
@@ -1267,7 +1275,10 @@ mod tests {
         let outcome = db.sync_found(&tree.discover()).unwrap();
 
         assert_eq!(outcome.updated, 1, "only alpha moved");
-        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("changed".to_string()));
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("changed".to_string())
+        );
         assert_eq!(stored_tags(&db, "20260730-beta"), Some("tool".to_string()));
     }
 
@@ -1283,7 +1294,10 @@ mod tests {
         tree.write_meta("alpha", ":after");
         db.sync_found(&tree.discover()).unwrap();
 
-        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("after".to_string()));
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("after".to_string())
+        );
     }
 
     #[test]
@@ -1294,7 +1308,10 @@ mod tests {
         tree.add("alpha", &["stale"]);
         let mut db = memory_db();
         db.sync_found(&tree.discover()).unwrap();
-        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("stale".to_string()));
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("stale".to_string())
+        );
 
         tree.remove_meta("alpha");
         db.sync_found(&tree.discover()).unwrap();
@@ -1312,7 +1329,10 @@ mod tests {
         tree.write_meta("alpha", ":fresh");
         db.sync_found(&tree.discover()).unwrap();
 
-        assert_eq!(stored_tags(&db, "20260730-alpha"), Some("fresh".to_string()));
+        assert_eq!(
+            stored_tags(&db, "20260730-alpha"),
+            Some("fresh".to_string())
+        );
     }
 
     #[test]
@@ -1435,13 +1455,17 @@ mod tests {
 
             let mut incremental = memory_db();
             let mut forced = memory_db();
-            incremental.sync_found(&incremental_tree.discover()).unwrap();
+            incremental
+                .sync_found(&incremental_tree.discover())
+                .unwrap();
             forced.sync_found(&forced_tree.discover()).unwrap();
 
             apply(&incremental_tree);
             apply(&forced_tree);
 
-            incremental.sync_found(&incremental_tree.discover()).unwrap();
+            incremental
+                .sync_found(&incremental_tree.discover())
+                .unwrap();
             forced.sync_forced(&forced_tree.discover()).unwrap();
 
             assert_eq!(
