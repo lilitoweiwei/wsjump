@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
@@ -154,10 +155,56 @@ pub fn id_for_path(workspaces_dir: &Path, path: &Path) -> AppResult<Option<Strin
 }
 
 /// Canonicalise a path, reporting failure with the path in the message.
+///
+/// POSIX resolves every component, so a spelling like `ws/./sub/..` fails
+/// when `sub` is absent even though the path names an existing directory
+/// (Windows folds `.`/`..` segments lexically during lookup). On failure,
+/// fold the remaining segments lexically onto the deepest existing ancestor,
+/// and require the folded result to exist so that a genuinely missing path
+/// still errors.
 fn canonical(path: &Path) -> AppResult<PathBuf> {
-    path.canonicalize().map_err(|e| {
-        AppError::runtime(format!("cannot resolve path '{}': {}", path.display(), e))
-    })
+    if let Ok(real) = path.canonicalize() {
+        return Ok(real);
+    }
+
+    // The path as a whole cannot be resolved; peel off components until one
+    // exists, then re-attach the missing tail, folding `.`/`..` by hand.
+    let mut tail: Vec<&OsStr> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if let Ok(real) = ancestor.canonicalize() {
+            let mut folded = real;
+            for &seg in tail.iter().rev() {
+                if seg == OsStr::new("..") {
+                    folded.pop();
+                } else if seg != OsStr::new(".") {
+                    folded.push(seg);
+                }
+            }
+            // Lexical folding must not invent paths: only a result that
+            // actually exists is a resolved path.
+            return folded.canonicalize().map_err(|e| {
+                AppError::runtime(format!("cannot resolve path '{}': {}", path.display(), e))
+            });
+        }
+        match (ancestor.file_name(), ancestor.parent()) {
+            (Some(seg), Some(parent)) => {
+                tail.push(seg);
+                ancestor = parent;
+            }
+            // A trailing `..` has no file name; peel it explicitly.
+            (None, Some(parent)) if ancestor.ends_with("..") => {
+                tail.push(OsStr::new(".."));
+                ancestor = parent;
+            }
+            _ => break,
+        }
+    }
+
+    Err(AppError::runtime(format!(
+        "cannot resolve path '{}': no existing ancestor",
+        path.display()
+    )))
 }
 
 /// Identify which workspace a path names, even if it no longer exists.
