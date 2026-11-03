@@ -1,7 +1,7 @@
 //! Reporting slow work in progress, so a pause is never unexplained.
 //!
 //! Sync is normally a few milliseconds and any output would be noise. But it can
-//! be slow -- a first run, a schema upgrade, a moved `workspaces_dir`, a cold
+//! be slow -- a first run, a changed root, a cold
 //! cache, a very large tree -- and then silence leaves the user staring at a
 //! stalled prompt.
 //!

@@ -55,8 +55,7 @@ pub fn load(workspace_dir: &Path) -> Meta {
 ///   line. It is split on whitespace; each token has a single leading ':'
 ///   stripped (if present) to form a tag. Only the first such line counts.
 /// - Every other line (including blank lines and any later ':' lines) is part
-///   of the description, joined by '\n'. Content is preserved only for
-///   substring matching; layout is irrelevant.
+///   of the description, joined by '\n'; descriptions are displayed, not searched.
 ///
 /// # Changing these rules requires a schema bump
 ///
@@ -64,9 +63,8 @@ pub fn load(workspace_dir: &Path) -> Meta {
 /// the file's [`crate::signature`] changes. Editing the rules here therefore
 /// does not retroactively fix already-stored rows: their signature still
 /// matches, so they are never re-parsed and keep results from the old rules
-/// forever. Any change to the parsing above must be accompanied by a bump of
-/// `SCHEMA_VERSION` in `db.rs`, whose migration clears the stored signatures and
-/// so forces a full re-read.
+/// forever. Any change to these rules must bump `SCHEMA_VERSION` in `db.rs`;
+/// a cache from another version is rejected and must be rebuilt.
 fn parse(text: &str) -> Meta {
     let mut tags: Vec<String> = Vec::new();
     let mut tag_line_found = false;
@@ -89,5 +87,18 @@ fn parse(text: &str) -> Meta {
     Meta {
         tags,
         desc: desc_lines.join("\n"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_first_tag_line_is_parsed_and_description_keeps_other_lines() {
+        let metadata = parse("before\n\n  :ai tool :rust\n:later description\nafter");
+        assert_eq!(metadata.tags, ["ai", "tool", "rust"]);
+        assert_eq!(metadata.desc, "before\n\n:later description\nafter");
+        assert!(parse("description only").tags.is_empty());
     }
 }

@@ -1,153 +1,175 @@
-# wsjump
+# wsjump v3
 
-wsjump 管理一批「小工作区」：每个工作区就是 `w/` 目录下的一个普通文件夹，命名形如 `20260730-wsjump`。它解决两个问题：
+wsjump 管理一批小工作区：工作区可以平铺在 `w/` 下，也可以按分类放在 `c/` 下。目录结构直接服务于文件管理器和保存对话框，wsjump 提供名称、标签检索和终端跳转。
 
-- **找**：工作区一多，靠眼睛在目录里翻很慢。wsjump 按 slug 和标签做子串匹配，一条命令（或一个交互式选择器）就能定位目标。
-- **跳**：`cd` 进一个嵌套很深的路径很啰嗦。wsjump 返回目标的绝对路径，配合 shell 集成可以一键跳转。
+详细设计见同级文档目录中的 [v3 设计文档](../doc/20261103-v3-design.md)。
 
-## 两种交互形态
+## 目录约定
 
-wsjump 是 Cargo workspace，产出两个可执行文件，各司其职：
+配置中的 `root_dir` 是包含 `w`、`c` 的大工作区根目录：
 
-| 二进制 | 形态 | 用途 |
-|---|---|---|
-| `wsjump` | 非交互 CLI | 查询并打印路径，服务自动化 / 脚本 |
-| `wsjump-tui` | 交互式 TUI | 在终端里弹出一个行内候选列表，选中即跳转（经 shell 函数） |
+```text
+G:/ws/
+├─ w/
+│  └─ scratch/
+└─ c/
+   └─ _ai/
+      ├─ _opencode/
+      │  └─ my-plugin/
+      └─ demo/
+```
 
-日常交互你几乎不会手敲 `wsjump-tui`，而是通过 shell 函数 `ju` 触发它（见「shell 集成」）。
+- `w/` 下的直接子目录是工作区，不要求日期前缀。
+- `c/` 的分类层级中，`_标签` 是分类目录，普通目录是工作区。
+- 分类标签从祖先目录继承：`my-plugin` 的分类标签是 `ai`、`opencode`，`demo` 的分类标签是 `ai`。
+- 找到工作区后不再递归，工作区内部的 `_cache` 等目录不会参与分类。
+- `c/` 下也可以直接放工作区，此时没有继承标签。`w/` 下的 `_` 没有分类含义。
+- 工作区名称非空、不含空白字符，必须是单个普通目录名。分类标签也必须非空、不含空白字符，`_` 和 `_two words` 不是合法分类。
+- 文件忽略，目录符号链接不作为扫描入口；不合法目录会告警并跳过其子树。
+- 根目录必须存在。`w`、`c` 可以暂不存在，创建工作区时会自动建立相应容器。
 
-## 快速上手
+工作区使用根目录相对路径作为唯一键，例如 `c/_ai/demo` 和 `c/_nvim/demo` 可以同名。路径预期基本冻结；移动或重命名工作区、修改祖先分类名称，会被视为旧工作区删除、新工作区出现，访问记录不自动跟随。
 
-1. 编译（见「安装 → 编译」）。
-2. 把 `wsjump.exe`、`wsjump-tui.exe` 复制到一个稳定的目录（如 `G:/ws/bin`），并在**同一目录**写好 `wsjump.toml`（见「安装 → 配置」）。
-3. 把该目录加入 `PATH`。
-4. 在 PowerShell profile 里加一行 shell 集成（见「安装 → shell 集成」）。
-5. 重开终端，输入 `ju` 即可交互式跳转；输入 `wsjump help` 查看查询指令。
+## 安装与配置
 
-## 安装
+### 编译与部署
 
-### 编译
-
-需要 Rust 工具链（edition 2021），以及一个 C 编译器（`rusqlite` 的 `bundled` 特性会把 SQLite 的 C 源码编进二进制；Windows 上即 MSVC 构建工具）。
+需要 Rust 工具链（edition 2021）和 C 编译器。SQLite 使用 `rusqlite` 的 bundled 特性；Windows 使用 MSVC 构建工具。
 
 ```powershell
 cargo build --release
 ```
 
-产物在 `target/release/` 下：`wsjump.exe` 与 `wsjump-tui.exe`。
-
-### 部署
-
-把两个 exe 复制到一个**稳定的目录**（建议是某个已在 `PATH` 里的 `bin/`，例如 `G:/ws/bin`）。随后在该目录写 `wsjump.toml` 配置文件。
-
-### 配置（wsjump.toml）
-
-放在可执行文件同目录下的 TOML 文件。最小内容：
+产物是 `target/release/wsjump.exe` 和 `target/release/wsjump-tui.exe`。将两个程序放在已加入 `PATH` 的稳定目录中，并在程序同目录创建 `wsjump.toml`：
 
 ```toml
-# w/ 目录的绝对路径
-workspaces_dir = "G:/ws/w"
+root_dir = "G:/ws"
 
-# 生成 / 解析日期所用的固定 UTC 偏移（小时），东八区 = 8
-utc_offset_hours = 8
-
-# --- 以下均可选 ---
-
-# 数据库文件位置；缺省为可执行文件同目录下的 wsjump.db
+# 可选，默认与可执行文件同目录下的 wsjump.db
 # db_file = "G:/ws/bin/wsjump.db"
 
-# 无 --sort 时的默认排序：recency（缺省）| id
+# 可选：recency（默认）或 name
 # default_sort = "recency"
 ```
 
-### 加入 PATH
+`root_dir` 必须是绝对路径。配置不接受未知项；旧的 `workspaces_dir`、`utc_offset_hours` 和 `id` 排序不再支持。
 
-确保 `bin/` 目录在你的用户环境变量 `PATH` 中，这样 `wsjump` / `wsjump-tui` 才能按名直接调用。
+### PowerShell 集成
 
-### shell 集成
-
-`wsjump-tui init` 会输出一段 PowerShell 集成片段（含安装说明与 `ju` 函数定义）。安装方式是把它加进你的 PowerShell profile（`notepad $PROFILE` 打开）：
+在 PowerShell profile 中加入：
 
 ```powershell
 Invoke-Expression (& wsjump-tui init | Out-String)
 ```
 
-安装后得到 `ju` 函数，可以交互式进行目录跳转，具体使用方法请执行 `ju --help`来查阅。
+重开终端后使用 `ju`：
 
-升级 wsjump-tui 后重新执行上面的 INSTALL 行即可让函数保持同步；卸载即从 profile 里删掉那一行。
-
-## 工作区结构约定
-
-- 所有工作区**平铺**在配置的 `workspaces_dir`（即 `w/`）下，没有嵌套。
-- 目录名形如 `<YYYYMMDD>` 或 `<YYYYMMDD>-<slug>`：
-  - 前 8 位必须是**合法日历日期**（`20261340` 这类非法日期视为非工作区）。
-  - 第 9 个字符若存在必须是 `-`；其后（可为空）即 slug。slug 内部允许再含 `-`（只在第 9 位切一刀）。
-  - 合法示例：`20260730`（slug 空）、`20260730-`（slug 空）、`20260730-wsjump`、`20260730-a-b-c`（slug = `a-b-c`）。
-- 不符合规则的名字会被 warn 到 stderr 并跳过，不收录为工作区。`w/` 下非目录的文件一律忽略。
-
-## wsmeta.txt 写法
-
-每个工作区可以有一个可选的 `wsmeta.txt`，用来登记标签和描述。它决定了 wsjump 能「搜到什么」。
-
-- **位置**：`<workspace>/wsmeta.txt`，不存在则标签、描述均为空。
-- **标签行**：**只有第一个「首个非空白字符是 `:`」的行**是标签行。按空白拆分成多个 token，逐个去掉前导 `:` 后收入标签。以下几种写法等价，都表示 `ai, tool, job` 三个标签：
-
-  ```
-  :ai tool job
-  :ai :tool :job
-  :ai tool :job
-  ```
-
-- **描述**：其余所有行（含空行、含之后再次出现的 `:` 开头行）一律作为描述，原样保留。描述仅用于展示，不参与查询。
-
-示例：
-
-```
-:tool :rust
-用于快速跳转到指定小工作区的小工具
+```powershell
+ju                              # 交互式选择并跳转
+ju new scratch                  # 创建 w/scratch 并跳转
+ju new my-plugin _ai/_opencode   # 创建 c/_ai/_opencode/my-plugin 并跳转
+ju touch                        # 记录当前工作区的访问
+ju sync                         # 强制同步全部工作区
+ju --help                       # 查看 shell 集成帮助
 ```
 
-## 索引机制
+`new`、`touch`、`sync` 也可缩写为 `n`、`t`、`s`。集成会把程序返回的绝对路径交给 `Set-Location`。程序的 UI、告警、同步进度写入 stderr，stdout 留给路径结果。
 
-wsjump 用一个 SQLite 数据库（默认是和二进制文件同目录的 `wsjump.db`）充当**索引+访问历史**，加速查询并支撑「最近访问」排序。
+### 从旧版升级
 
-- **自动 sync**：每次进程启动都会先扫一遍 `w/` 并与数据库对账（新建、更新、删除）。它只重读「大小或修改时间发生变化」的 `wsmeta.txt`，所以稳态下几乎零成本；通常你无需手动干预。
-- **最近访问（recency）排序**：数据库为每个工作区记录 `last_access`（初始为创建日零点）。「跳转 / 新建 / `touch`」都会记一次访问，使该工作区在默认排序中居前。
-- **`wsjump sync`**：强制全量重读所有工作区元数据。只有当磁盘上的文件明明是对的、索引里的结果却显得陈旧（签名碰撞或外部改动）时才需要它。带路径 `wsjump sync <path>` 只重读那一个工作区。
-- **数据库不可用时的降级**：开库 / 迁移 / sync 失败只 warn 到 stderr，然后退回「扫盘 + 内存过滤 + 按 id 排序」，命令照常成功——数据库只是加速与状态载体，绝不能阻止你到达工作区。
-- **数据库可重建**：它本质是一份缓存 + 少量状态，删掉后下次 sync 会重建索引（代价是丢失访问历史，所有工作区退回按创建日排序）。
+v3 不保留旧版配置和数据库兼容逻辑。更新配置后，使用新的 `db_file`，或在程序退出后移除旧 `wsjump.db` 及其 `-wal`、`-shm` 文件，再由 v3 重建。重建会丢失旧访问历史。
 
-## 使用
+数据库 schema 必须为 3。遇到其他版本时程序会告警，降级为扫盘查询、按名称排序，直到换用或重建数据库。已有日期前缀目录无需立即重命名，它们按完整普通名称识别和搜索。
 
-具体指令以内联帮助为准，运行 `wsjump` （或者交互式tui的 `ju --help`） 查看完整说明。
+## wsmeta.txt
 
-- **查询**：一串空格分隔的 token，token 之间是 AND 关系。`:开头` 的 token 只匹配标签；其余 token 匹配 slug + 标签。匹配是**大小写不敏感的子串**。空查询匹配全部。
-- **不参与匹配**：日期前缀与描述（所以找东西时不用打日期）。
-- **排序**：`--sort=recency`（最近访问优先，缺省）或 `--sort=id`（按目录名字典序）。
-- **退出码**：`0` 成功（含 `ls` 空结果）；`1` 运行期错误（如 `top` 无匹配、配置缺失）；`2` 用法错误（未知子命令 / 选项）。
+每个工作区可以有一个可选的 `wsmeta.txt`：
+
+```text
+:opencode rust tool
+OpenCode 插件开发
+```
+
+- 只有第一个「首个非空白字符为 `:`」的行是标签行。
+- 按空白字符拆分标签，每个 token 去掉一个可选前导 `:`。`:ai tool` 与 `:ai :tool` 等价。
+- 其余行，包括空行和之后再次以 `:` 开头的行，都作为描述。
+- 有效标签是分类标签与文件标签的并集；按分类从外到内、然后文件标签的顺序去重，保留原始文本。
+- 文件不存在时元信息为空。读取失败时告警并使用空元信息，分类标签仍然保留。
+
+例如上述文件放在 `c/_ai/_opencode/my-plugin` 中，最终标签为 `ai`、`opencode`、`rust`、`tool`。删除文件只清除文件贡献的标签和描述。
+
+## 命令
+
+```text
+wsjump new <名称> [分类路径]
+wsjump ls [--sort=name|recency] [查询...]
+wsjump top [--sort=name|recency] [查询...]
+wsjump tags [--sort=name|recency]
+wsjump touch [路径]
+wsjump sync [路径]
+wsjump help
+```
+
+### 创建
+
+```powershell
+wsjump new scratch
+wsjump new my-plugin _ai/_opencode
+```
+
+名称必填，最多两个位置参数，每次只创建一个工作区。省略分类路径时放在 `w`；提供时相对于 `c`，每个分量必须是 `_标签`。缺失分类自动建立，已有目标报冲突，不覆盖。部分 IO 失败前建立的空分类目录可以保留。
+
+### 检索与排序
+
+- 空格分隔的查询 token 之间为 AND。
+- `:ai` 只匹配有效标签；普通 token 匹配完整名称和有效标签。
+- 匹配为大小写不敏感的子串；描述和路径键不参与查询。
+- `recency` 最近访问优先，同时间以唯一路径键降序打破并列。
+- `name` 按完整名称字典序升序，同名以唯一路径键升序打破并列。
+- `ls` 输出每个匹配工作区的绝对路径；`top` 输出第一项。
+- `tags` 输出空格分隔的标签集合；名称排序下标签为字典序，最近访问排序下保留工作区访问顺序中的首次出现顺序。
+- `--sort=name` 和 `--sort name` 均可；查询名称以 `-` 开头时使用 `--` 结束选项解析。
+
+TUI 使用同一个查询接口，候选项仅显示名称、标签、描述：
+
+```text
+demo  :ai :tool  描述……
+demo  :nvim      描述……
+```
+
+↑/↓ 选择，Enter 跳转，Esc 退出，Ctrl+S 切换排序，Shift+←/→ 横向滚动。同名且标签、描述相同的项可能显示相同，但内部路径仍然独立。
+
+## 索引与访问记录
+
+SQLite 保存元信息缓存和最近访问时间，每个进程启动时自动同步一次：
+
+- 发现过程枚举 `w` 和 `c` 的分类目录，并检查每个工作区 `wsmeta.txt` 的修改时间、大小。
+- 仅新工作区或签名变化时重读文件、合并标签；稳定态不读取元信息正文、不更新工作区记录。
+- 分类改名或移动会产生新路径键，自然重新加载元信息。
+- 根目录变更会强制刷新缓存中的绝对路径。
+- 发现过程必须完整成功才执行对账，读取分支失败不会把未扫描到的工作区当成已删除。
+- 首次入库用目录创建时间初始化访问时间；无法取得时使用 `0`。创建、`touch`、TUI 选择记录当前 Unix 秒，普通同步保留已有访问时间。
+- `touch` 可从工作区内部任意目录执行；带路径时也可指向内部文件。
+- `sync` 强制重读全部元信息；`sync <路径>` 只同步所属工作区，也接受最后一个分量所指工作区已删除的路径。多个祖先都已删除时使用全量同步。
+- 数据库不可用时继续扫盘查询，按名称排序，不记录访问。删除并重建数据库会丢失访问历史。
+
+退出码：`0` 成功（包括 `ls` 空结果），`1` 运行期错误，`2` 用法错误。
 
 ## 开发
 
-### 技术栈
+仓库由三个 crate 组成：
 
-- 语言：Rust（edition 2021）。
-- 仓库：Cargo workspace，三个 crate（双二进制）：
-
-  ```
-  wsjump/
-    crates/
-      wsjump-core/    lib：全部业务逻辑（CLI 与 TUI 共享）
-      wsjump-cli/     bin：产物 wsjump(.exe)，argv 分发 + 子命令
-      wsjump-tui/     bin：产物 wsjump-tui(.exe)，交互选择器 + init
-  ```
-
-### 编译与测试
-
-```powershell
-cargo build --release   # 编译
-cargo test              # 测试（core / cli 的单元测试；tui 的分页与选择逻辑以 App 单元测试覆盖）
+```text
+crates/wsjump-core/   共享目录规则、发现、元信息、索引和创建逻辑
+crates/wsjump-cli/    非交互命令，产物 wsjump
+crates/wsjump-tui/    交互选择器及 PowerShell 集成，产物 wsjump-tui
 ```
 
-### 平台
+```powershell
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --release
+```
 
-当前以 **Windows / PowerShell** 为主平台；跨平台（bash / zsh / fish 集成、Linux 终端行为实测）在待办中。
+测试覆盖分类继承、工作区边界、创建和冲突、路径归属、增量同步、分类移动、访问记录、数据库降级、Unicode 检索一致性和同名工作区分页。当前主要平台是 Windows / PowerShell。

@@ -10,8 +10,11 @@ pub enum Command {
     Top(Query),
     /// `ls [--sort=<order>] <query...>`
     Ls(Query),
-    /// `new <slug...>`
-    New(Vec<String>),
+    /// `new <name> [categories]`; category paths are relative to `c/`.
+    New {
+        name: String,
+        categories: Option<String>,
+    },
     /// `touch [<path>]`; no path means the current directory.
     Touch(Option<String>),
     /// `sync [<path>]`; no path means the whole directory.
@@ -43,7 +46,7 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
     match command.as_str() {
         "top" => Ok(Command::Top(parse_query(rest)?)),
         "ls" => Ok(Command::Ls(parse_query(rest)?)),
-        "new" => Ok(Command::New(rest.to_vec())),
+        "new" => parse_new(rest),
         "touch" => parse_touch(rest),
         "sync" => parse_sync(rest),
         "tags" => parse_tags(rest),
@@ -55,7 +58,7 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
 /// Parse a query, extracting any `--sort` option.
 ///
 /// A lone `--` ends option parsing so a query token may start with a dash;
-/// without it, searching for a slug like `-wip` would be unusable.
+/// without it, searching for a name like `-wip` would be unusable.
 fn parse_query(args: &[String]) -> AppResult<Query> {
     let mut tokens = Vec::new();
     let mut sort = None;
@@ -77,7 +80,7 @@ fn parse_query(args: &[String]) -> AppResult<Query> {
             }
             "--sort" => {
                 let value = iter.next().ok_or_else(|| {
-                    AppError::usage("--sort requires a value: id or recency".to_string())
+                    AppError::usage("--sort requires a value: name or recency".to_string())
                 })?;
                 sort = Some(parse_sort(value)?);
             }
@@ -97,10 +100,27 @@ fn parse_query(args: &[String]) -> AppResult<Query> {
 fn parse_sort(value: &str) -> AppResult<SortOrder> {
     SortOrder::parse(value).ok_or_else(|| {
         AppError::usage(format!(
-            "invalid sort order '{}': expected id or recency",
+            "invalid sort order '{}': expected name or recency",
             value
         ))
     })
+}
+
+/// Parse exactly one workspace name and at most one category path.
+fn parse_new(args: &[String]) -> AppResult<Command> {
+    match args {
+        [name] => Ok(Command::New {
+            name: name.clone(),
+            categories: None,
+        }),
+        [name, categories] => Ok(Command::New {
+            name: name.clone(),
+            categories: Some(categories.clone()),
+        }),
+        _ => Err(AppError::usage(
+            "new requires a name and an optional category path",
+        )),
+    }
 }
 
 /// Parse `touch [<path>]`, which takes at most one path.
@@ -108,9 +128,7 @@ fn parse_touch(args: &[String]) -> AppResult<Command> {
     match args {
         [] => Ok(Command::Touch(None)),
         [path] => Ok(Command::Touch(Some(path.clone()))),
-        _ => Err(AppError::usage(
-            "touch takes at most one path".to_string(),
-        )),
+        _ => Err(AppError::usage("touch takes at most one path".to_string())),
     }
 }
 
@@ -140,7 +158,7 @@ fn parse_tags(args: &[String]) -> AppResult<Command> {
             }
             "--sort" => {
                 let value = iter.next().ok_or_else(|| {
-                    AppError::usage("--sort requires a value: id or recency".to_string())
+                    AppError::usage("--sort requires a value: name or recency".to_string())
                 })?;
                 sort = Some(parse_sort(value)?);
             }
@@ -188,31 +206,37 @@ mod tests {
     fn query_tokens_are_collected() {
         let query = ls_query(&["ls", "alpha", ":tag"]);
         assert_eq!(query.tokens, vec!["alpha".to_string(), ":tag".to_string()]);
-        assert!(query.sort.is_none(), "no --sort means use the configured default");
+        assert!(
+            query.sort.is_none(),
+            "no --sort means use the configured default"
+        );
     }
 
     #[test]
     fn sort_accepts_both_spellings() {
         assert_eq!(
-            ls_query(&["ls", "--sort=id"]).sort,
-            Some(SortOrder::Id),
+            ls_query(&["ls", "--sort=name"]).sort,
+            Some(SortOrder::Name),
             "--sort=value must be accepted"
         );
         assert_eq!(
-            ls_query(&["ls", "--sort", "id"]).sort,
-            Some(SortOrder::Id),
+            ls_query(&["ls", "--sort", "name"]).sort,
+            Some(SortOrder::Name),
             "--sort value must be accepted too"
         );
     }
 
     #[test]
     fn sort_accepts_recency() {
-        assert_eq!(ls_query(&["ls", "--sort=recency"]).sort, Some(SortOrder::Recency));
+        assert_eq!(
+            ls_query(&["ls", "--sort=recency"]).sort,
+            Some(SortOrder::Recency)
+        );
     }
 
     #[test]
     fn sort_does_not_swallow_query_tokens() {
-        let query = ls_query(&["ls", "--sort=id", "alpha"]);
+        let query = ls_query(&["ls", "--sort=name", "alpha"]);
         assert_eq!(query.tokens, vec!["alpha".to_string()]);
     }
 
@@ -274,7 +298,10 @@ mod tests {
     fn sync_without_a_path_means_everything() {
         // Deliberately the opposite default from touch: there is no such thing as
         // touching every workspace, but syncing all of them is the main use.
-        assert!(matches!(parse_args(&["sync"]).unwrap(), Command::Sync(None)));
+        assert!(matches!(
+            parse_args(&["sync"]).unwrap(),
+            Command::Sync(None)
+        ));
     }
 
     #[test]
@@ -292,23 +319,39 @@ mod tests {
     }
 
     #[test]
-    fn new_keeps_all_arguments() {
-        match parse_args(&["new", "my", "slug"]).unwrap() {
-            Command::New(args) => assert_eq!(args, vec!["my".to_string(), "slug".to_string()]),
+    fn new_accepts_a_name_and_optional_category_path() {
+        match parse_args(&["new", "my-plugin", "_ai/_opencode"]).unwrap() {
+            Command::New { name, categories } => {
+                assert_eq!(name, "my-plugin");
+                assert_eq!(categories.as_deref(), Some("_ai/_opencode"));
+            }
             _ => panic!("expected new"),
         }
+        assert!(matches!(
+            parse_args(&["new", "scratch"]).unwrap(),
+            Command::New {
+                categories: None,
+                ..
+            }
+        ));
+        assert_eq!(parse_args(&["new"]).unwrap_err().code, 2);
+        assert_eq!(parse_args(&["new", "a", "b", "c"]).unwrap_err().code, 2);
+        assert_eq!(parse_args(&["ls", "--sort=id"]).unwrap_err().code, 2);
     }
 
     #[test]
     fn tags_without_arguments_uses_the_default_order() {
-        assert!(matches!(parse_args(&["tags"]).unwrap(), Command::Tags(None)));
+        assert!(matches!(
+            parse_args(&["tags"]).unwrap(),
+            Command::Tags(None)
+        ));
     }
 
     #[test]
     fn tags_accepts_a_sort_order() {
-        match parse_args(&["tags", "--sort", "id"]).unwrap() {
-            Command::Tags(Some(SortOrder::Id)) => {}
-            _ => panic!("expected tags with id sort"),
+        match parse_args(&["tags", "--sort", "name"]).unwrap() {
+            Command::Tags(Some(SortOrder::Name)) => {}
+            _ => panic!("expected tags with name sort"),
         }
     }
 

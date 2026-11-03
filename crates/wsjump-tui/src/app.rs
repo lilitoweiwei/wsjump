@@ -48,7 +48,7 @@ impl App {
         let sort = if index.is_indexed() {
             default_sort
         } else {
-            SortOrder::Id
+            SortOrder::Name
         };
 
         let mut app = App {
@@ -194,7 +194,7 @@ impl App {
     /// directory change happens in the shell function and is beyond our reach.
     pub fn take_selected(&self) -> Option<String> {
         let ws = self.loaded.get(self.selected)?;
-        self.index.record_visit(&ws.id);
+        self.index.record_visit(&ws.key);
         Some(ws.path.display().to_string())
     }
 }
@@ -203,20 +203,14 @@ impl App {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use wsjump_core::workspace::{parse_dir_name, sort_by_id};
+    use wsjump_core::workspace::sort_by_name;
 
-    /// A workspace created on 2026-07-30 with the given slug.
-    ///
-    /// The date comes from parsing the directory name, the same way a real
-    /// workspace's does, which avoids depending on the date library here.
-    fn workspace(slug: &str) -> Workspace {
-        let id = format!("20260730-{}", slug);
-        let (date, slug) = parse_dir_name(&id).expect("valid workspace name");
+    /// A flat workspace with the given complete name.
+    fn workspace(name: &str) -> Workspace {
         Workspace {
-            path: PathBuf::from(format!("G:/ws/w/{}", id)),
-            id,
-            date,
-            slug,
+            path: PathBuf::from(format!("G:/ws/w/{}", name)),
+            key: format!("w/{}", name),
+            name: name.to_string(),
             tags: Vec::new(),
             desc: String::new(),
             last_access: None,
@@ -231,8 +225,8 @@ mod tests {
         let mut workspaces: Vec<Workspace> = (0..count)
             .map(|i| workspace(&((b'a' + i as u8) as char).to_string()))
             .collect();
-        sort_by_id(&mut workspaces);
-        App::new(Index::Degraded(workspaces), SortOrder::Id).expect("build app")
+        sort_by_name(&mut workspaces);
+        App::new(Index::Degraded(workspaces), SortOrder::Name).expect("build app")
     }
 
     /// Type a query into the app and re-query.
@@ -317,9 +311,15 @@ mod tests {
     #[test]
     fn selected_path_follows_the_highlight() {
         let mut app = app_with(3);
-        assert_eq!(app.take_selected().unwrap(), workspace("a").path.display().to_string());
+        assert_eq!(
+            app.take_selected().unwrap(),
+            workspace("a").path.display().to_string()
+        );
         app.select_next().expect("select next");
-        assert_eq!(app.take_selected().unwrap(), workspace("b").path.display().to_string());
+        assert_eq!(
+            app.take_selected().unwrap(),
+            workspace("b").path.display().to_string()
+        );
     }
 
     #[test]
@@ -349,17 +349,17 @@ mod tests {
     fn recency_is_refused_without_a_database() {
         // Falling back silently would label the list 'recency' while showing name
         // order.
-        let app = App::new(Index::Degraded(vec![workspace("a")]), SortOrder::Recency)
-            .expect("build app");
+        let app =
+            App::new(Index::Degraded(vec![workspace("a")]), SortOrder::Recency).expect("build app");
         assert!(!app.can_sort_by_recency());
-        assert_eq!(app.sort(), SortOrder::Id);
+        assert_eq!(app.sort(), SortOrder::Name);
     }
 
     #[test]
     fn toggling_sort_does_nothing_without_a_database() {
         let mut app = app_with(2);
         app.toggle_sort().expect("toggle");
-        assert_eq!(app.sort(), SortOrder::Id);
+        assert_eq!(app.sort(), SortOrder::Name);
     }
 
     /// A temporary database file, removed when dropped.
@@ -395,30 +395,31 @@ mod tests {
         }
     }
 
-    /// An app backed by a real database holding `slugs`.
+    /// An app backed by a real database holding the supplied workspace names.
     ///
     /// The workspaces are materialised as real directories, because sync now
     /// discovers them from disk rather than being handed a list.
-    fn indexed_app(temp: &TempDb, slugs: &[&str], sort: SortOrder) -> App {
+    fn indexed_app(temp: &TempDb, names: &[&str], sort: SortOrder) -> App {
         let tree = temp.path.with_extension("tree");
         let _ = std::fs::remove_dir_all(&tree);
-        for slug in slugs {
-            std::fs::create_dir_all(tree.join(format!("20260730-{}", slug)))
-                .expect("create workspace dir");
+        for name in names {
+            std::fs::create_dir_all(tree.join("w").join(name)).expect("create workspace dir");
         }
         let config = wsjump_core::config::Config::for_test(&tree);
         let found = wsjump_core::scan::discover(&config).expect("discover");
 
-        let offset = time::UtcOffset::from_hms(8, 0, 0).unwrap();
         let mut db = wsjump_core::db::Db::open(&temp.path).expect("open db");
         db.sync(
             &found,
-            offset,
             &wsjump_core::db::SyncScope::Everything,
             false,
             &mut wsjump_core::progress::SilentSink,
         )
         .expect("sync");
+        for name in names {
+            db.touch(&format!("w/{name}"), 1)
+                .expect("seed equal access times");
+        }
         App::new(Index::Indexed(db), sort).expect("build app")
     }
 
@@ -430,7 +431,7 @@ mod tests {
         assert_eq!(app.sort(), SortOrder::Recency);
 
         app.toggle_sort().expect("toggle");
-        assert_eq!(app.sort(), SortOrder::Id);
+        assert_eq!(app.sort(), SortOrder::Name);
         app.toggle_sort().expect("toggle back");
         assert_eq!(app.sort(), SortOrder::Recency);
     }
@@ -440,17 +441,31 @@ mod tests {
         let temp = TempDb::new("visit");
         let mut app = indexed_app(&temp, &["a", "b"], SortOrder::Recency);
 
-        // These share a creation date, so recency breaks the tie by id
+        // These share an access time, so recency breaks the tie by key
         // descending: "b" leads until something is actually visited.
-        assert_eq!(app.results()[0].id, "20260730-b");
+        assert_eq!(app.results()[0].key, "w/b");
 
         app.select_next().expect("select next");
-        assert_eq!(app.results()[app.selected()].id, "20260730-a");
+        assert_eq!(app.results()[app.selected()].key, "w/a");
         app.take_selected().expect("select a workspace");
 
         // Recording the visit is the whole point of selection: the workspace just
         // jumped to must lead next time.
         app.reload().expect("reload");
-        assert_eq!(app.results()[0].id, "20260730-a");
+        assert_eq!(app.results()[0].key, "w/a");
+    }
+
+    #[test]
+    fn same_name_candidates_jump_to_their_independent_paths() {
+        let mut first = workspace("demo");
+        first.key = "c/_ai/demo".into();
+        first.path = PathBuf::from("G:/ws/c/_ai/demo");
+        let mut second = workspace("demo");
+        second.key = "c/_nvim/demo".into();
+        second.path = PathBuf::from("G:/ws/c/_nvim/demo");
+        let mut app = App::new(Index::Degraded(vec![first, second]), SortOrder::Name).unwrap();
+        assert_eq!(app.take_selected().as_deref(), Some("G:/ws/c/_ai/demo"));
+        app.select_next().unwrap();
+        assert_eq!(app.take_selected().as_deref(), Some("G:/ws/c/_nvim/demo"));
     }
 }

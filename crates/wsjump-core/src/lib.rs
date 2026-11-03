@@ -12,3 +12,6 @@ pub mod query;
 pub mod scan;
 pub mod signature;
 pub mod workspace;
+
+#[cfg(test)]
+mod test_support;

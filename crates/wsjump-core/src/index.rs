@@ -4,7 +4,7 @@
 //! when the database is unusable. The database is an accelerator and a place to
 //! keep access history; it is not on the critical path. A broken database must
 //! never stop the user reaching a workspace, so this falls back to scanning the
-//! directory directly, which always works because it needs nothing but `w/`.
+//! directory directly, which needs only the `w/` and `c/` containers.
 //!
 //! Front-ends see one API and therefore degrade identically; each does not get
 //! to invent its own error handling.
@@ -16,14 +16,14 @@ use crate::filter;
 use crate::progress::ProgressSink;
 use crate::query::{SortOrder, Token};
 use crate::scan::{self, Discovery};
-use crate::workspace::{now_timestamp, sort_by_id, Workspace};
+use crate::workspace::{now_timestamp, sort_by_name, Workspace};
 
 /// A queryable view of all workspaces, backed by the database when possible.
 pub enum Index {
     /// The normal case: queries run as SQL and access history is recorded.
     Indexed(Db),
     /// The database is unusable. Queries run against a directory scan and
-    /// recency ordering is unavailable, so results fall back to `id` order.
+    /// recency ordering is unavailable, so results fall back to name order.
     Degraded(Vec<Workspace>),
 }
 
@@ -60,12 +60,12 @@ impl Index {
     /// Open the index having synced only the given workspace.
     pub fn open_syncing_only(
         config: &Config,
-        id: &str,
+        key: &str,
         sink: &mut dyn ProgressSink,
     ) -> AppResult<(Index, SyncOutcome)> {
         Self::open_with(
             config,
-            &SyncScope::OnlyWorkspace(id.to_string()),
+            &SyncScope::OnlyWorkspace(key.to_string()),
             true,
             sink,
         )
@@ -96,15 +96,18 @@ impl Index {
                 );
                 // Only now is the metadata of every workspace needed, since
                 // there is no index to answer from.
-                let mut workspaces: Vec<Workspace> =
-                    found.workspaces.iter().map(scan::Discovered::load).collect();
-                sort_by_id(&mut workspaces);
+                let mut workspaces: Vec<Workspace> = found
+                    .workspaces
+                    .iter()
+                    .map(scan::Discovered::load)
+                    .collect();
+                sort_by_name(&mut workspaces);
                 Ok((Index::Degraded(workspaces), SyncOutcome::default()))
             }
         }
     }
 
-    /// Open, migrate and sync the database, describing any failure as a string
+    /// Open or initialize and sync the database, describing any failure as a string
     /// so the caller can decide to warn rather than abort.
     fn open_db(
         config: &Config,
@@ -114,11 +117,8 @@ impl Index {
         sink: &mut dyn ProgressSink,
     ) -> Result<(Db, SyncOutcome), String> {
         let path = config.db_file().map_err(|e| e.message)?;
-        let offset = config.utc_offset().map_err(|e| e.message)?;
         let mut db = Db::open(&path).map_err(|e| e.message)?;
-        let outcome = db
-            .sync(found, offset, scope, force, sink)
-            .map_err(|e| e.message)?;
+        let outcome = db.sync(found, scope, force, sink).map_err(|e| e.message)?;
         Ok((db, outcome))
     }
 
@@ -164,22 +164,22 @@ impl Index {
         }
     }
 
-    /// Record a visit to the workspace with the given id, at the current time.
+    /// Record a visit to the workspace with the given path key, at the current time.
     ///
     /// Best effort: a failure is warned about but not returned, since a recorded
     /// visit only affects future ordering and must never turn a successful jump
     /// into a failure.
-    pub fn record_visit(&self, id: &str) {
+    pub fn record_visit(&self, key: &str) {
         let Index::Indexed(db) = self else {
             return;
         };
-        match db.touch(id, now_timestamp()) {
+        match db.touch(key, now_timestamp()) {
             Ok(true) => {}
             Ok(false) => eprintln!(
                 "wsjump: warning: cannot record visit to '{}': not in the index",
-                id
+                key
             ),
-            Err(e) => eprintln!("wsjump: warning: cannot record visit to '{}': {}", id, e),
+            Err(e) => eprintln!("wsjump: warning: cannot record visit to '{}': {}", key, e),
         }
     }
 }
@@ -196,11 +196,11 @@ fn page_from_scan(
 ) -> Page {
     let matched = filter::filter(workspaces, tokens);
 
-    // The list is in id order, so resuming means continuing past the cursor's id.
+    // Resume by both name and key: distinct workspaces can have identical names.
     let start = match after {
         Some(cursor) => matched
             .iter()
-            .position(|ws| ws.id.as_str() > cursor.id())
+            .position(|ws| (ws.name.as_str(), ws.key.as_str()) > (cursor.name(), cursor.key()))
             .unwrap_or(matched.len()),
         None => 0,
     };
@@ -224,25 +224,23 @@ mod tests {
     use super::*;
     use crate::query;
     use std::path::PathBuf;
-    use time::{Date, Month};
 
-    /// A workspace created on 2026-07-30 with the given slug.
-    fn workspace(slug: &str) -> Workspace {
+    /// A flat workspace with the given complete name.
+    fn workspace(name: &str) -> Workspace {
         Workspace {
-            id: format!("20260730-{}", slug),
-            date: Date::from_calendar_date(2026, Month::July, 30).unwrap(),
-            slug: slug.to_string(),
-            path: PathBuf::from(format!("G:/ws/w/20260730-{}", slug)),
+            key: format!("w/{}", name),
+            name: name.to_string(),
+            path: PathBuf::from(format!("G:/ws/w/{}", name)),
             tags: Vec::new(),
             desc: String::new(),
             last_access: None,
         }
     }
 
-    /// A degraded index over the given slugs, in id order as `open` leaves it.
-    fn degraded(slugs: &[&str]) -> Index {
-        let mut workspaces: Vec<Workspace> = slugs.iter().map(|s| workspace(s)).collect();
-        sort_by_id(&mut workspaces);
+    /// A degraded index sorted the same way as the real fallback.
+    fn degraded(names: &[&str]) -> Index {
+        let mut workspaces: Vec<Workspace> = names.iter().map(|s| workspace(s)).collect();
+        sort_by_name(&mut workspaces);
         Index::Degraded(workspaces)
     }
 
@@ -258,7 +256,7 @@ mod tests {
         let tokens = query::parse_str("alpha");
         let page = index.query(&tokens, SortOrder::Recency, 10, None).unwrap();
         assert_eq!(page.workspaces.len(), 1);
-        assert_eq!(page.workspaces[0].id, "20260730-alpha");
+        assert_eq!(page.workspaces[0].key, "w/alpha");
     }
 
     #[test]
@@ -266,7 +264,7 @@ mod tests {
         let index = degraded(&["a", "b", "c", "d", "e"]);
         let expected: Vec<String> = ["a", "b", "c", "d", "e"]
             .iter()
-            .map(|s| format!("20260730-{}", s))
+            .map(|s| format!("w/{}", s))
             .collect();
 
         // Paging is re-implemented for this path, so it needs the same
@@ -275,9 +273,9 @@ mod tests {
         let mut cursor = None;
         loop {
             let page = index
-                .query(&[], SortOrder::Id, 2, cursor.as_ref())
+                .query(&[], SortOrder::Name, 2, cursor.as_ref())
                 .unwrap();
-            ids.extend(page.workspaces.iter().map(|ws| ws.id.clone()));
+            ids.extend(page.workspaces.iter().map(|ws| ws.key.clone()));
             match page.next {
                 Some(next) => cursor = Some(next),
                 None => break,
@@ -289,7 +287,7 @@ mod tests {
     #[test]
     fn degraded_query_reports_more_results() {
         let index = degraded(&["a", "b", "c"]);
-        let page = index.query(&[], SortOrder::Id, 2, None).unwrap();
+        let page = index.query(&[], SortOrder::Name, 2, None).unwrap();
         assert_eq!(page.workspaces.len(), 2);
         assert!(page.has_more());
     }
@@ -297,30 +295,30 @@ mod tests {
     #[test]
     fn degraded_full_page_reports_no_more() {
         let index = degraded(&["a", "b"]);
-        let page = index.query(&[], SortOrder::Id, 2, None).unwrap();
+        let page = index.query(&[], SortOrder::Name, 2, None).unwrap();
         assert!(!page.has_more());
     }
 
     #[test]
     fn degraded_query_all_returns_everything() {
         let index = degraded(&["a", "b", "c"]);
-        let all = index.query_all(&[], SortOrder::Id).unwrap();
+        let all = index.query_all(&[], SortOrder::Name).unwrap();
         assert_eq!(all.len(), 3);
     }
 
     #[test]
-    fn degraded_recency_request_falls_back_to_id_order() {
+    fn degraded_recency_request_falls_back_to_name_order() {
         let index = degraded(&["gamma", "alpha", "beta"]);
         // Recency cannot be honoured without stored access times; the order must
         // still be deterministic rather than arbitrary.
         let all = index.query_all(&[], SortOrder::Recency).unwrap();
-        let ids: Vec<String> = all.into_iter().map(|ws| ws.id).collect();
+        let ids: Vec<String> = all.into_iter().map(|ws| ws.key).collect();
         assert_eq!(
             ids,
             vec![
-                "20260730-alpha".to_string(),
-                "20260730-beta".to_string(),
-                "20260730-gamma".to_string(),
+                "w/alpha".to_string(),
+                "w/beta".to_string(),
+                "w/gamma".to_string(),
             ]
         );
     }
@@ -328,6 +326,43 @@ mod tests {
     #[test]
     fn recording_a_visit_on_a_degraded_index_is_harmless() {
         // Nowhere to record it, but it must not panic or fail the caller.
-        degraded(&["alpha"]).record_visit("20260730-alpha");
+        degraded(&["alpha"]).record_visit("w/alpha");
+    }
+
+    #[test]
+    fn degraded_paging_distinguishes_duplicate_names_by_key() {
+        let mut workspaces = vec![workspace("demo"), workspace("demo"), workspace("demo")];
+        workspaces[0].key = "c/_ai/demo".into();
+        workspaces[1].key = "c/_nvim/demo".into();
+        sort_by_name(&mut workspaces);
+        let expected: Vec<_> = workspaces.iter().map(|ws| ws.key.clone()).collect();
+        let index = Index::Degraded(workspaces);
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = index
+                .query(&[], SortOrder::Name, 1, cursor.as_ref())
+                .unwrap();
+            actual.extend(page.workspaces.into_iter().map(|ws| ws.key));
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn broken_database_falls_back_to_category_aware_queries() {
+        let tree = crate::test_support::TempTree::new("fallback");
+        tree.write("c/_ai/demo/wsmeta.txt", ":tool");
+        let database_directory = tree.dir("not-a-database");
+        let config = Config::for_test_with_db(&tree.root, &database_directory);
+        let index = Index::open(&config, &mut crate::progress::SilentSink).unwrap();
+        assert!(!index.is_indexed());
+        let tokens = query::parse_str(":ai :tool");
+        let page = index.query(&tokens, SortOrder::Recency, 10, None).unwrap();
+        assert_eq!(page.workspaces[0].key, "c/_ai/demo");
+        assert_eq!(page.workspaces[0].last_access, None);
     }
 }

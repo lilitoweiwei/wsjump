@@ -41,7 +41,8 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
     if app.loaded_count() == 0 {
         frame.render_widget(
-            Paragraph::new("no matching workspace").style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new("no matching workspace")
+                .style(Style::default().add_modifier(Modifier::DIM)),
             area,
         );
         return;
@@ -65,10 +66,10 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// Build a single-line display for one workspace: id + tags + desc, shifted
+/// Build a single-line display for one workspace: name + tags + desc, shifted
 /// left by `hscroll` characters so truncated content can be revealed.
 fn item_line(ws: &Workspace, hscroll: usize) -> Line<'static> {
-    let mut text = ws.id.clone();
+    let mut text = ws.name.clone();
     if !ws.tags.is_empty() {
         let tags = ws
             .tags
@@ -121,4 +122,26 @@ fn position(app: &App) -> String {
         app.loaded_count(),
         if app.has_more() { "+" } else { "" }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn candidate_displays_name_tags_and_description_without_path_key() {
+        let workspace = Workspace {
+            key: "c/_ai/demo".into(),
+            name: "demo".into(),
+            path: PathBuf::from("G:/ws/c/_ai/demo"),
+            tags: vec!["ai".into(), "tool".into()],
+            desc: "first\nsecond".into(),
+            last_access: None,
+        };
+        assert_eq!(
+            item_line(&workspace, 0).to_string(),
+            "demo  :ai :tool  first second"
+        );
+    }
 }

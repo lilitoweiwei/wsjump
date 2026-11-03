@@ -8,7 +8,7 @@ use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
 use wsjump_core::progress::StderrProgress;
-use wsjump_core::workspace::id_for_path;
+use wsjump_core::workspace::key_for_path;
 
 /// Run the `touch` subcommand.
 ///
@@ -22,16 +22,13 @@ pub fn run(config: &Config, path: Option<&String>) -> AppResult<()> {
             .map_err(|e| AppError::runtime(format!("cannot determine current directory: {}", e)))?,
     };
 
-    let id = id_for_path(&config.workspaces_dir, &target)?.ok_or_else(|| {
-        AppError::runtime(format!(
-            "'{}' is not inside a workspace",
-            target.display()
-        ))
+    let key = key_for_path(&config.root_dir, &target)?.ok_or_else(|| {
+        AppError::runtime(format!("'{}' is not inside a workspace", target.display()))
     })?;
 
     // Opening the index also syncs it, so a workspace created moments ago is
     // already known and can be touched.
     let index = Index::open(config, &mut StderrProgress::new())?;
-    index.record_visit(&id);
+    index.record_visit(&key);
     Ok(())
 }

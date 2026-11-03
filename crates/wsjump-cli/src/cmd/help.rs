@@ -4,7 +4,7 @@ use wsjump_core::error::AppResult;
 
 /// Usage text listing every subcommand with a one-line description.
 const USAGE: &str = "\
-wsjump - workspace query tool
+wsjump v3 - workspace query tool
 
 USAGE:
     wsjump <command> [args...]
@@ -12,7 +12,7 @@ USAGE:
 COMMANDS:
     top [options] <query...>   Print the absolute path of the first matching workspace.
     ls [options] <query...>    Print one absolute path per matching workspace.
-    new <slug...>              Create a new workspace (YYYYMMDD[-slug]) and print its path.
+    new <name> [categories]    Create in w/ or c/<categories>; create missing categories.
     touch [<path>]             Record a visit to a workspace (default: current directory).
     sync [<path>]              Re-read workspace metadata (default: all workspaces).
     tags [--sort=<order>]      Print every distinct tag, space-separated.
@@ -20,18 +20,24 @@ COMMANDS:
 
 OPTIONS:
     --sort=<order>    Result order: 'recency' (most recently visited first) or
-                      'id' (alphabetical). Defaults to the configured
+                       'name' (alphabetical). Defaults to the configured
                       default_sort, or recency.
     --                End of options; later dashed arguments are query tokens.
 
 QUERY:
     A query is a list of space-separated tokens combined with AND.
     A ':'-prefixed token (e.g. :ai) matches tags only; other tokens match the
-    slug and tags. Matching is case-insensitive substring. An empty query
+    complete name and tags. Matching is case-insensitive substring. An empty query
     matches all workspaces.
 
-    The date prefix and the description are not searched, so finding a
-    workspace never requires typing a date.
+    Tags include ancestor categories and wsmeta.txt tags. Descriptions and
+    path keys are not searched. No date prefix is required.
+
+NEW:
+    wsjump new scratch
+    wsjump new my-plugin _ai/_opencode
+    Names contain no whitespace. Category paths are relative to c/ and each
+    component is an _tag directory. Missing categories are created automatically.
 
 SYNC:
     The index keeps itself up to date, re-reading only metadata files whose

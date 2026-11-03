@@ -2,7 +2,7 @@
 //!
 //! This is the fallback used when the database is unusable. It deliberately
 //! mirrors the fast query's semantics (see `db::query`): case-insensitive
-//! substring matching against `slug` and `tags` only, tokens combined with AND,
+//! substring matching against complete names and tags, tokens combined with AND,
 //! an empty token list keeping everything. Were the two to disagree, the same
 //! query would return different results depending on whether the database
 //! happened to be working.
@@ -29,11 +29,8 @@ fn matches_token(ws: &Workspace, token: &Token) -> bool {
     match token {
         // A ':'-prefixed token deliberately narrows to tags only.
         Token::Tag(needle) => matches_tags(ws, needle),
-        // desc is excluded: it can be arbitrarily long, and searching it belongs
-        // to the future slow query. The date prefix is excluded too, which is
-        // why this checks `slug` rather than `id`: matching the id would force
-        // the user to type a date to find anything.
-        Token::Text(needle) => contains(&ws.slug, needle) || matches_tags(ws, needle),
+        // Descriptions and path keys are display/location data, not query text.
+        Token::Text(needle) => contains(&ws.name, needle) || matches_tags(ws, needle),
     }
 }
 
@@ -52,27 +49,25 @@ mod tests {
     use super::*;
     use crate::query;
     use std::path::PathBuf;
-    use time::{Date, Month};
 
-    /// A workspace created on 2026-07-30 with the given slug and tags.
-    fn workspace(slug: &str, tags: &[&str]) -> Workspace {
+    /// A flat workspace with the given name and tags.
+    fn workspace(name: &str, tags: &[&str]) -> Workspace {
         Workspace {
-            id: format!("20260730-{}", slug),
-            date: Date::from_calendar_date(2026, Month::July, 30).unwrap(),
-            slug: slug.to_string(),
-            path: PathBuf::from(format!("G:/ws/w/20260730-{}", slug)),
+            key: format!("w/{}", name),
+            name: name.to_string(),
+            path: PathBuf::from(format!("G:/ws/w/{}", name)),
             tags: tags.iter().map(|t| t.to_string()).collect(),
             desc: String::new(),
             last_access: None,
         }
     }
 
-    /// Ids kept when filtering `workspaces` by `query`.
+    /// Keys kept when filtering `workspaces` by `query`.
     fn kept(workspaces: &[Workspace], query: &str) -> Vec<String> {
         let tokens = query::parse_str(query);
         filter(workspaces, &tokens)
             .into_iter()
-            .map(|ws| ws.id.clone())
+            .map(|ws| ws.key.clone())
             .collect()
     }
 
@@ -83,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn text_token_matches_slug_substring_anywhere() {
+    fn text_token_matches_name_substring_anywhere() {
         let all = [workspace("wsjump", &[])];
         assert_eq!(kept(&all, "jump").len(), 1);
         assert_eq!(kept(&all, "wsj").len(), 1);
@@ -113,16 +108,16 @@ mod tests {
     }
 
     #[test]
-    fn text_token_does_not_match_the_date_prefix() {
-        let all = [workspace("alpha", &[])];
-        assert!(kept(&all, "20260730").is_empty());
+    fn text_token_searches_the_complete_name_including_optional_dates() {
+        let all = [workspace("20260730-alpha", &[])];
+        assert_eq!(kept(&all, "20260730"), ["w/20260730-alpha"]);
     }
 
     #[test]
     fn tag_token_searches_tags_only() {
         let all = [workspace("rust", &[]), workspace("alpha", &["rust"])];
-        // ':rust' must ignore the workspace whose *slug* is "rust".
-        assert_eq!(kept(&all, ":rust"), vec!["20260730-alpha".to_string()]);
+        // ':rust' must ignore the workspace whose name is "rust".
+        assert_eq!(kept(&all, ":rust"), vec!["w/alpha".to_string()]);
     }
 
     #[test]
@@ -131,7 +126,7 @@ mod tests {
             workspace("alpha", &["rust", "tool"]),
             workspace("beta", &["rust"]),
         ];
-        assert_eq!(kept(&all, ":rust :tool"), vec!["20260730-alpha".to_string()]);
+        assert_eq!(kept(&all, ":rust :tool"), vec!["w/alpha".to_string()]);
     }
 
     #[test]
@@ -139,7 +134,7 @@ mod tests {
         // The SQL path escapes LIKE wildcards; plain substring matching must
         // agree rather than treating them as patterns.
         let all = [workspace("plain", &[]), workspace("a_b", &[])];
-        assert_eq!(kept(&all, "a_b"), vec!["20260730-a_b".to_string()]);
+        assert_eq!(kept(&all, "a_b"), vec!["w/a_b".to_string()]);
         assert!(kept(&all, "%").is_empty());
     }
 }

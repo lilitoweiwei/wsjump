@@ -1,155 +1,207 @@
-//! Discovery of workspaces in the `w/` directory.
-//!
-//! Discovery is split from metadata loading on purpose. Enumerating the
-//! directory is nearly free -- the entries carry everything a directory name can
-//! tell us -- while opening each `wsmeta.txt` is where almost all of the cost
-//! lives. Sync therefore discovers everything, then reads metadata only for the
-//! workspaces whose [`crate::signature`] shows they changed.
+//! Discover flat and categorized workspaces without reading metadata bodies.
 
 use std::fs;
-use std::path::PathBuf;
-
-use time::Date;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::meta;
 use crate::signature::{self, MetaSignature};
-use crate::workspace::{parse_dir_name, Workspace};
+use crate::workspace::{
+    category_tag, key_for_relative_path, merge_tags, unix_timestamp, valid_name, Workspace,
+};
 
-/// A workspace found on disk, before its metadata has been read.
-///
-/// Everything here comes from the directory entry itself, so building one costs
-/// nothing beyond the enumeration that found it.
+/// Structural workspace information and its current metadata-file signature.
 pub struct Discovered {
-    /// The whole directory name, e.g. "20260730-wsjump".
-    pub id: String,
-    /// Creation date parsed from the 8-digit prefix.
-    pub date: Date,
-    /// The part after the first '-'; may be empty.
-    pub slug: String,
-    /// Absolute path to the workspace directory.
+    /// Portable root-relative path key, including the container.
+    pub key: String,
+    /// Complete workspace directory name.
+    pub name: String,
+    /// Absolute path for metadata loading and jumping.
     pub path: PathBuf,
-    /// Current signature of its `wsmeta.txt`, or `None` if it has none.
+    /// Tags inherited from category ancestors, outermost first.
+    pub category_tags: Vec<String>,
+    /// Current file signature; absent metadata is represented by `None`.
     pub signature: Option<MetaSignature>,
 }
 
 impl Discovered {
-    /// Read and parse this workspace's metadata, producing a full `Workspace`.
-    ///
-    /// This is the expensive part of a scan, so it is a separate step the caller
-    /// invokes only when the signature says the file changed.
+    /// Read file metadata and combine it with category tags.
     pub fn load(&self) -> Workspace {
-        let m = meta::load(&self.path);
+        let metadata = meta::load(&self.path);
         Workspace {
-            id: self.id.clone(),
-            date: self.date,
-            slug: self.slug.clone(),
+            key: self.key.clone(),
+            name: self.name.clone(),
             path: self.path.clone(),
-            tags: m.tags,
-            desc: m.desc,
+            tags: merge_tags(&self.category_tags, &metadata.tags),
+            desc: metadata.desc,
             last_access: None,
         }
     }
+
+    /// Initial access time for a new database row; only inserts need this stat.
+    pub fn initial_access(&self) -> i64 {
+        fs::metadata(&self.path)
+            .and_then(|metadata| metadata.created())
+            .map(unix_timestamp)
+            .unwrap_or(0)
+    }
 }
 
-/// The result of enumerating a `w/` directory.
-///
-/// The root travels with the entries deliberately. Sync has to know which
-/// directory the entries came from, in order to notice that `workspaces_dir` now
-/// points somewhere else; keeping the two together makes it impossible to sync
-/// one directory's entries while claiming they came from another.
+/// A complete discovery snapshot, tied to the root that produced it.
 pub struct Discovery {
-    /// The directory that was enumerated.
+    /// Configured absolute root, used to invalidate paths when the root changes.
     pub root: PathBuf,
-    /// The workspaces found in it, in filesystem order.
+    /// Workspaces in filesystem traversal order; queries handle sorting.
     pub workspaces: Vec<Discovered>,
 }
 
-/// Enumerate every workspace directory under `workspaces_dir`.
+/// Enumerate `w/` and category branches of `c/`, stopping at workspace entrances.
 ///
-/// Each valid workspace directory (name matches `YYYYMMDD[-slug]` with a real
-/// calendar date) yields a [`Discovered`]. Names that do not match are warned
-/// about on stderr and skipped.
-///
-/// No `wsmeta.txt` is opened here; only stat'ed, which is markedly cheaper.
-/// The result is in filesystem enumeration order: discovery does not order,
-/// because ordering is a query concern and belongs to the database.
+/// Missing containers are empty. Unreadable branches abort discovery before
+/// synchronization can mistakenly delete rows from an incomplete snapshot.
 pub fn discover(config: &Config) -> AppResult<Discovery> {
-    let dir = &config.workspaces_dir;
-    let entries = fs::read_dir(dir).map_err(|e| {
-        AppError::runtime(format!(
-            "cannot read workspaces directory '{}': {}",
-            dir.display(),
-            e
-        ))
-    })?;
-
-    let mut found: Vec<Discovered> = Vec::new();
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("wsjump: warning: cannot read a directory entry: {}", e);
-                continue;
-            }
-        };
-
-        // Only directories are workspaces.
-        let file_type = match entry.file_type() {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!(
-                    "wsjump: warning: cannot determine type of '{}': {}",
-                    entry.path().display(),
-                    e
-                );
-                continue;
-            }
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let (date, slug) = match parse_dir_name(&name) {
-            Some(parsed) => parsed,
-            None => {
-                eprintln!(
-                    "wsjump: warning: '{}' is not a valid workspace name; skipping",
-                    name
-                );
-                continue;
-            }
-        };
-
-        let path = entry.path();
-        let signature = signature::read(&path);
-
-        found.push(Discovered {
-            id: name,
-            date,
-            slug,
-            path,
-            signature,
-        });
+    let root = &config.root_dir;
+    if !root.is_absolute() || !root.is_dir() {
+        return Err(AppError::runtime(format!(
+            "root_dir must be an existing absolute directory: {}",
+            root.display()
+        )));
     }
 
+    let mut pending = Vec::new();
+    for (container, categorized) in [("w", false), ("c", true)] {
+        let path = root.join(container);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                pending.push((path, Vec::<String>::new(), categorized));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(AppError::runtime(format!(
+                    "container is not a directory: {}",
+                    path.display()
+                )))
+            }
+            Err(error) => return Err(scan_error(&path, error)),
+        }
+    }
+
+    let mut workspaces = Vec::new();
+    while let Some((directory, category_tags, categorized)) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(|error| scan_error(&directory, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| scan_error(&directory, error))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| scan_error(&path, error))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let raw_name = entry.file_name();
+            let Some(name) = raw_name.to_str().filter(|name| valid_name(name)) else {
+                eprintln!(
+                    "wsjump: warning: invalid directory name '{}'; skipping",
+                    path.display()
+                );
+                continue;
+            };
+            if categorized && name.starts_with('_') {
+                let Some(tag) = category_tag(name) else {
+                    eprintln!(
+                        "wsjump: warning: invalid category '{}'; skipping",
+                        path.display()
+                    );
+                    continue;
+                };
+                let mut inherited = category_tags.clone();
+                inherited.push(tag.to_string());
+                pending.push((path, inherited, true));
+                continue;
+            }
+
+            // Category ancestry is encoded in the key. A moved category creates
+            // new keys, so unchanged metadata signatures cannot retain old tags.
+            let relative = path.strip_prefix(root).expect("entry below root");
+            let key = key_for_relative_path(relative).expect("discovered workspace has a key");
+            workspaces.push(Discovered {
+                key,
+                name: name.to_string(),
+                signature: signature::read(&path),
+                path,
+                category_tags: category_tags.clone(),
+            });
+        }
+    }
     Ok(Discovery {
-        root: dir.clone(),
-        workspaces: found,
+        root: root.clone(),
+        workspaces,
     })
 }
 
-/// Discover every workspace and read all of their metadata.
-///
-/// Used where the whole picture is needed at once and there is no stored
-/// signature to compare against: the database-free fallback path.
+/// Discover and load every workspace, for callers without an index cache.
 pub fn scan(config: &Config) -> AppResult<Vec<Workspace>> {
     Ok(discover(config)?
         .workspaces
         .iter()
         .map(Discovered::load)
         .collect())
+}
+
+/// Attach the failed branch to an enumeration error.
+fn scan_error(path: &Path, error: std::io::Error) -> AppError {
+    AppError::runtime(format!("cannot scan '{}': {}", path.display(), error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TempTree;
+    use crate::workspace::sort_by_name;
+
+    #[test]
+    fn discovery_inherits_tags_and_stops_at_workspace_contents() {
+        let tree = TempTree::new("discovery");
+        tree.dir("w/20260730-old/src/_ignored/nested");
+        tree.dir("w/_private");
+        tree.dir("c/_ai/_opencode/plugin/src/_ignored/nested");
+        tree.dir("c/_ai/demo");
+        tree.dir("c/plain");
+        tree.dir("c/_/invalid");
+        tree.dir("c/_two words/invalid");
+        tree.write(
+            "c/_ai/_opencode/plugin/wsmeta.txt",
+            ":opencode rust rust\ndescription",
+        );
+        let mut workspaces = scan(&Config::for_test(&tree.root)).unwrap();
+        sort_by_name(&mut workspaces);
+        assert_eq!(workspaces.len(), 5);
+        let plugin = workspaces.iter().find(|ws| ws.name == "plugin").unwrap();
+        assert_eq!(plugin.key, "c/_ai/_opencode/plugin");
+        assert_eq!(plugin.tags, ["ai", "opencode", "rust"]);
+        assert_eq!(plugin.desc, "description");
+        assert_eq!(
+            workspaces.iter().find(|ws| ws.name == "demo").unwrap().tags,
+            ["ai"]
+        );
+        assert!(workspaces
+            .iter()
+            .find(|ws| ws.name == "_private")
+            .unwrap()
+            .tags
+            .is_empty());
+    }
+
+    #[test]
+    fn missing_containers_are_empty_but_wrong_types_are_errors() {
+        let tree = TempTree::new("containers");
+        let config = Config::for_test(&tree.root);
+        assert!(discover(&config).unwrap().workspaces.is_empty());
+        tree.dir("c/_ai/demo");
+        assert_eq!(discover(&config).unwrap().workspaces.len(), 1);
+        tree.write("w", "not a container");
+        assert!(discover(&config).is_err());
+    }
 }

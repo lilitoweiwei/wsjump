@@ -1,23 +1,18 @@
-//! `wsjump new <slug...>`: create a new workspace directory named
-//! `YYYYMMDD[-slug]` under `w/` and print its absolute path.
+//! `wsjump new <name> [categories]`: create one workspace and print its path.
 
 use wsjump_core::config::Config;
 use wsjump_core::create::create_workspace;
 use wsjump_core::error::AppResult;
 use wsjump_core::index::Index;
 use wsjump_core::progress::StderrProgress;
-use wsjump_core::workspace::id_for_path;
+use wsjump_core::workspace::key_for_path;
 
-/// Run the `new` subcommand. All positional args are joined with '-' to form
-/// the slug (empty if none); creation and dating live in core.
-pub fn run(config: &Config, args: &[String]) -> AppResult<()> {
-    let slug = args.join("-");
-    let path = create_workspace(config, &slug)?;
+/// Create in `w/` or in the supplied category chain, then record a visit.
+pub fn run(config: &Config, name: &str, categories: Option<&str>) -> AppResult<()> {
+    let path = create_workspace(config, name, categories)?;
 
     // A just-created workspace is almost certainly about to be used, so record a
-    // visit: that puts it at the top of recency order rather than level with
-    // everything else created today, since a visit stores the current time while
-    // a new row is seeded with the day's midnight.
+    // visit so the next picker puts it among the recently contacted workspaces.
     record_visit(config, &path);
 
     println!("{}", path.display());
@@ -33,8 +28,8 @@ fn record_visit(config: &Config, path: &std::path::Path) {
     let Ok(index) = Index::open(config, &mut StderrProgress::new()) else {
         return;
     };
-    match id_for_path(&config.workspaces_dir, path) {
-        Ok(Some(id)) => index.record_visit(&id),
+    match key_for_path(&config.root_dir, path) {
+        Ok(Some(key)) => index.record_visit(&key),
         Ok(None) => {}
         Err(e) => eprintln!("wsjump: warning: {}", e),
     }

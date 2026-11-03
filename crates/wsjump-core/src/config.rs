@@ -1,127 +1,107 @@
-//! Configuration file location and parsing.
-//!
-//! `wsjump` reads a TOML config placed next to the executable. The path is
-//! resolved via `current_exe()`, which on Windows returns the invoked path
-//! (e.g. the symlink in `bin/`) WITHOUT resolving symlinks / junctions to the
-//! real binary in `target/<profile>/`. The config therefore lives next to the
-//! invoked binary in `bin/`. It tells the tool where `w/` lives and which fixed
-//! UTC offset to use for date generation / parsing.
-//!
-//! Optional keys (`db_file`, `default_sort`) have defaults and are read through
-//! accessors rather than public fields, so callers never handle the `Option`.
+//! Configuration beside the invoked executable, including the shared root.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use time::UtcOffset;
 
 use crate::error::{AppError, AppResult};
 use crate::query::SortOrder;
 
-/// File name of the config, expected to sit beside the executable.
-const CONFIG_FILE_NAME: &str = "wsjump.toml";
-
-/// File name of the database, used when `db_file` is not configured.
-const DB_FILE_NAME: &str = "wsjump.db";
-
-/// Parsed configuration.
+/// Parsed v3 config. Unknown keys and relative roots are rejected.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Absolute path to the `w/` directory that holds all workspaces.
-    pub workspaces_dir: PathBuf,
-    /// Fixed UTC offset in hours used to derive "today" for date prefixes
-    /// and to interpret directory-name dates (e.g. 8 for UTC+8).
-    pub utc_offset_hours: i8,
-    /// Where to keep the database. Optional; defaults to `wsjump.db` beside
-    /// the executable. Use [`Config::db_file`] rather than reading this.
+    /// Absolute root containing the flat `w/` and categorized `c/` containers.
+    pub root_dir: PathBuf,
+    /// Optional database location; defaults beside the invoked executable.
     #[serde(default)]
     db_file: Option<PathBuf>,
-    /// Result order used when no `--sort` is given. Optional; defaults to
-    /// [`SortOrder::DEFAULT`]. Use [`Config::default_sort`] to read it.
+    /// Optional query order; defaults to recency.
     #[serde(default)]
     default_sort: Option<SortOrder>,
 }
 
 impl Config {
-    /// Load the config from the file next to the current executable.
-    ///
-    /// Any failure (cannot locate the exe, file missing, unreadable, or
-    /// malformed TOML) is a runtime error: without config we cannot locate
-    /// `w/` and therefore cannot work.
-    pub fn load() -> AppResult<Config> {
-        let path = config_path()?;
-        let text = fs::read_to_string(&path).map_err(|e| {
+    /// Load `wsjump.toml` beside the executable and validate its root.
+    pub fn load() -> AppResult<Self> {
+        let path = exe_dir()?.join("wsjump.toml");
+        let text = fs::read_to_string(&path).map_err(|error| {
             AppError::runtime(format!(
                 "cannot read config file '{}': {}",
                 path.display(),
-                e
+                error
             ))
         })?;
-        let config: Config = toml::from_str(&text).map_err(|e| {
-            AppError::runtime(format!(
-                "cannot parse config file '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+        Self::parse(&text)
+    }
+
+    /// Parse v3 settings; legacy keys are deliberately unsupported.
+    fn parse(text: &str) -> AppResult<Self> {
+        let config: Self = toml::from_str(text)
+            .map_err(|error| AppError::runtime(format!("cannot parse config: {}", error)))?;
+        if !config.root_dir.is_absolute() {
+            return Err(AppError::runtime("root_dir must be an absolute path"));
+        }
         Ok(config)
     }
 
-    /// Resolve the database path: the configured `db_file`, else `wsjump.db`
-    /// beside the executable (i.e. next to the config file).
+    /// Resolve the configured database or the default executable-adjacent file.
     pub fn db_file(&self) -> AppResult<PathBuf> {
         match &self.db_file {
             Some(path) => Ok(path.clone()),
-            None => Ok(exe_dir()?.join(DB_FILE_NAME)),
+            None => Ok(exe_dir()?.join("wsjump.db")),
         }
     }
 
-    /// The configured default result order, or [`SortOrder::DEFAULT`].
+    /// Default query order when the command does not override it.
     pub fn default_sort(&self) -> SortOrder {
-        self.default_sort.unwrap_or(SortOrder::DEFAULT)
+        self.default_sort.unwrap_or_default()
     }
 
-    /// The configured fixed UTC offset, validated.
-    ///
-    /// Every date computation (today's prefix, a directory date's midnight)
-    /// must go through this so they cannot disagree about when a day starts.
-    pub fn utc_offset(&self) -> AppResult<UtcOffset> {
-        UtcOffset::from_hms(self.utc_offset_hours, 0, 0).map_err(|e| {
-            AppError::runtime(format!(
-                "invalid utc_offset_hours {}: {}",
-                self.utc_offset_hours, e
-            ))
-        })
-    }
-
-    /// A config pointing at `dir`, for tests that need to scan a real tree.
-    ///
-    /// Not behind `cfg(test)`: integration-style tests in sibling crates need it
-    /// too, and a second constructor is cheaper than exposing the fields.
+    /// Build a config for real-tree tests in core and sibling crates.
     #[doc(hidden)]
-    pub fn for_test(dir: &std::path::Path) -> Config {
-        Config {
-            workspaces_dir: dir.to_path_buf(),
-            utc_offset_hours: 8,
+    pub fn for_test(root: &Path) -> Self {
+        Self {
+            root_dir: root.to_path_buf(),
             db_file: None,
+            default_sort: None,
+        }
+    }
+
+    /// Build an isolated index configuration for integration-style tests.
+    #[doc(hidden)]
+    pub fn for_test_with_db(root: &Path, database: &Path) -> Self {
+        Self {
+            root_dir: root.to_path_buf(),
+            db_file: Some(database.to_path_buf()),
             default_sort: None,
         }
     }
 }
 
-/// Resolve the expected path of the config file: `<exe dir>/wsjump.toml`.
-fn config_path() -> AppResult<PathBuf> {
-    Ok(exe_dir()?.join(CONFIG_FILE_NAME))
-}
-
-/// Directory holding the invoked executable (see the module comment on why
-/// this is `bin/` rather than `target/<profile>/`).
+/// Directory containing the invoked executable, including a Windows bin symlink.
 fn exe_dir() -> AppResult<PathBuf> {
     let exe = std::env::current_exe()
-        .map_err(|e| AppError::runtime(format!("cannot locate current executable: {}", e)))?;
-    let dir = exe.parent().ok_or_else(|| {
-        AppError::runtime("current executable has no parent directory".to_string())
-    })?;
-    Ok(dir.to_path_buf())
+        .map_err(|error| AppError::runtime(format!("cannot locate executable: {}", error)))?;
+    exe.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| AppError::runtime("executable has no parent directory"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v3_config_requires_an_absolute_root_and_new_sort_name() {
+        let root = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        let config =
+            Config::parse(&format!("root_dir = {root:?}\ndefault_sort = \"name\"")).unwrap();
+        assert_eq!(config.default_sort(), SortOrder::Name);
+        assert!(Config::parse("root_dir = \"relative\"").is_err());
+        assert!(Config::parse("workspaces_dir = \"G:/ws/w\"\nutc_offset_hours = 8").is_err());
+        assert!(Config::parse(&format!("root_dir = {root:?}\nutc_offset_hours = 8")).is_err());
+        assert!(Config::parse(&format!("root_dir = {root:?}\ndefault_sort = \"id\"")).is_err());
+    }
 }

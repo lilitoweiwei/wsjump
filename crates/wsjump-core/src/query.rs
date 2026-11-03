@@ -6,7 +6,7 @@ use serde::Deserialize;
 pub enum Token {
     /// A ':'-prefixed token; matched only against tags (the ':' is stripped).
     Tag(String),
-    /// A plain token; matched against id + desc + tags.
+    /// A plain token; matched against the complete workspace name and tags.
     Text(String),
 }
 
@@ -34,15 +34,15 @@ pub fn parse_str(input: &str) -> Vec<Token> {
 
 /// How query results are ordered.
 ///
-/// Both orders are total (ties broken by `id`), so paging with a keyset cursor
+/// Both orders are total (ties broken by `key`), so paging with a keyset cursor
 /// is deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
-    /// Most recently accessed first; ties broken by descending id.
+    /// Most recently accessed first; ties broken by descending path key.
     Recency,
     /// Lexicographic by directory name, ascending.
-    Id,
+    Name,
 }
 
 impl SortOrder {
@@ -55,7 +55,7 @@ impl SortOrder {
     pub fn parse(value: &str) -> Option<SortOrder> {
         match value {
             "recency" => Some(SortOrder::Recency),
-            "id" => Some(SortOrder::Id),
+            "name" => Some(SortOrder::Name),
             _ => None,
         }
     }
@@ -64,15 +64,15 @@ impl SortOrder {
     pub fn as_str(self) -> &'static str {
         match self {
             SortOrder::Recency => "recency",
-            SortOrder::Id => "id",
+            SortOrder::Name => "name",
         }
     }
 
     /// The other order; used by the TUI's toggle key.
     pub fn toggled(self) -> SortOrder {
         match self {
-            SortOrder::Recency => SortOrder::Id,
-            SortOrder::Id => SortOrder::Recency,
+            SortOrder::Recency => SortOrder::Name,
+            SortOrder::Name => SortOrder::Recency,
         }
     }
 }

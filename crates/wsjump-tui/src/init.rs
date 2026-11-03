@@ -33,7 +33,7 @@ function ju {
         # chosen workspace path on stdout. Jump only when a path was returned.
         $dir = wsjump-tui
         if ($LASTEXITCODE -eq 0 -and $dir) {
-            Set-Location $dir
+            Set-Location -LiteralPath $dir
         }
         return
     }
@@ -49,7 +49,7 @@ function ju {
             # Create the workspace (its path is printed), then jump into it.
             $dir = wsjump new @rest
             if ($LASTEXITCODE -eq 0 -and $dir) {
-                Set-Location $dir
+                Set-Location -LiteralPath $dir
             }
         }
         { $_ -in 't', 'touch' } {
@@ -64,9 +64,10 @@ function ju {
             $usage = @(
                 'usage:'
                 '  ju                 jump interactively'
-                '  ju n|new [slug...] create a workspace and jump into it'
+                '  ju n|new <name> [categories] create a workspace and jump into it'
                 '  ju t|touch [path]  record a visit (default: the current directory)'
                 '  ju s|sync [path]   force a full re-read of workspace metadata'
+                '  example: ju new my-plugin _ai/_opencode (creates missing categories)'
             )
             $usage | Write-Host
         }

@@ -11,7 +11,7 @@ use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
 use wsjump_core::progress::StderrProgress;
-use wsjump_core::workspace::id_for_possibly_missing_path;
+use wsjump_core::workspace::key_for_possibly_missing_path;
 
 /// Run the `sync` subcommand.
 ///
@@ -23,14 +23,14 @@ pub fn run(config: &Config, path: Option<&String>) -> AppResult<()> {
             let target = PathBuf::from(path);
             // Deliberately tolerant of a missing directory: "I deleted this
             // workspace, update the index" is a normal reason to run this.
-            let id = id_for_possibly_missing_path(&config.workspaces_dir, &target)?
-                .ok_or_else(|| {
+            let key =
+                key_for_possibly_missing_path(&config.root_dir, &target)?.ok_or_else(|| {
                     AppError::usage(format!(
-                        "'{}' does not name a workspace under the workspaces directory",
+                        "'{}' does not name a workspace under w/ or c/",
                         target.display()
                     ))
                 })?;
-            Index::open_syncing_only(config, &id, &mut StderrProgress::new())?
+            Index::open_syncing_only(config, &key, &mut StderrProgress::new())?
         }
         None => Index::open_forcing_sync(config, &mut StderrProgress::new())?,
     };
