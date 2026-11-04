@@ -69,18 +69,52 @@ pub fn all_tags(workspaces: &[Workspace], order: SortOrder) -> Vec<String> {
     }
 }
 
-/// Whether a name is one nonempty directory component without whitespace.
+/// Whether a name is one directory component that stays portable.
+///
+/// The rule is the *intersection* of what Windows and POSIX accept, so a tree
+/// created on one platform can be carried to the other without the directory
+/// silently disappearing or failing to copy:
+///
+/// - nonempty, not `.`/`..`, and free of whitespace, `/` and `\`: a name is a
+///   single component and must never rewrite the key it is part of;
+/// - no `<` `>` `:` `"` `|` `?` `*` and no control characters: rejected by NTFS;
+/// - no trailing `.`: Win32 strips it, so `a.` would come back as `a`;
+/// - no Windows device name (`CON`, `NUL`, `COM1`…), with or without an
+///   extension: those cannot be created on Windows at all.
+///
+/// The `components()` check is a backstop for anything the character rules miss
+/// -- on Windows a name like `a:b` parses as a drive prefix rather than one
+/// ordinary component.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
-        && !name
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '/' | '\\'))
+        && !name.ends_with('.')
+        && !name.chars().any(|ch| {
+            ch.is_whitespace()
+                || ch.is_control()
+                || matches!(ch, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
+        })
+        && !is_windows_device_name(name)
         && matches!(
             Path::new(name).components().next(),
             Some(Component::Normal(_))
         )
+}
+
+/// Whether `name` is a Windows reserved device name, ignoring any extension.
+///
+/// `con`, `Con.txt` and `NUL` are all unusable as directory names on Windows,
+/// while nothing stops them from existing on POSIX.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let numbered = stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    numbered
 }
 
 /// Extract one category tag, removing exactly one leading underscore.
@@ -251,16 +285,41 @@ mod tests {
 
     #[test]
     fn names_and_categories_follow_the_same_rules() {
-        for name in ["demo", "20260730-wsjump", "工作区", "_private"] {
-            assert!(valid_name(name));
+        for name in ["demo", "20260730-wsjump", "工作区", "_private", "a.b", "COM", "cmd1"] {
+            assert!(valid_name(name), "{name} should be a valid name");
         }
-        for name in ["", ".", "..", "two words", "a/b", "a\\b", "a\tb"] {
-            assert!(!valid_name(name));
+        for name in [
+            "",
+            ".",
+            "..",
+            "two words",
+            "a/b",
+            "a\\b",
+            "a\tb",
+            // Not portable to Windows, so not accepted on either platform.
+            "a:b",
+            "a?b",
+            "a*b",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a\u{0}b",
+            "a.",
+            "CON",
+            "nul",
+            "con.txt",
+            "COM1",
+            "LPT9",
+        ] {
+            assert!(!valid_name(name), "{name} should be rejected");
         }
         assert_eq!(category_tag("_ai"), Some("ai"));
         assert_eq!(category_tag("__ai"), Some("_ai"));
         assert_eq!(category_tag("_"), None);
         assert_eq!(category_tag("_two words"), None);
+        assert_eq!(category_tag("_a."), None);
+        assert_eq!(category_tag("_CON"), None);
     }
 
     #[test]
