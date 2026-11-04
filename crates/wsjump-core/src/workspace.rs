@@ -285,7 +285,15 @@ mod tests {
 
     #[test]
     fn names_and_categories_follow_the_same_rules() {
-        for name in ["demo", "20260730-wsjump", "工作区", "_private", "a.b", "COM", "cmd1"] {
+        for name in [
+            "demo",
+            "20260730-wsjump",
+            "工作区",
+            "_private",
+            "a.b",
+            "COM",
+            "cmd1",
+        ] {
             assert!(valid_name(name), "{name} should be a valid name");
         }
         for name in [

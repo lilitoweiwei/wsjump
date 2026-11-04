@@ -61,7 +61,7 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
                     name,
                     ["bash", "powershell"]
                         .into_iter()
-                        .filter_map(|n| Shell::parse(n))
+                        .filter_map(Shell::parse)
                         .map(|s| s.name())
                         .collect::<Vec<_>>()
                         .join(", ")

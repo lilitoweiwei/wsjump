@@ -4,9 +4,9 @@
 //! home of `wsjump.db`. What "install directory" means differs per platform
 //! because `current_exe()` answers differently: see [`install_dir`].
 
-use std::fs;
 #[cfg(unix)]
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -259,11 +259,8 @@ mod tests {
         assert_eq!(candidates, vec![bin.clone(), real.clone()]);
 
         // An argv[0] carrying a directory is used as spelled, without probing.
-        let spelled = posix_candidates(
-            &exe,
-            Some(OsStr::new("/opt/ws/bin/wsjump")),
-            Some(path_var),
-        );
+        let spelled =
+            posix_candidates(&exe, Some(OsStr::new("/opt/ws/bin/wsjump")), Some(path_var));
         assert_eq!(spelled.first(), Some(&PathBuf::from("/opt/ws/bin")));
     }
 
@@ -277,10 +274,16 @@ mod tests {
         let bin = tree.dir("bin");
         let real = tree.dir("target/release");
         tree.write("bin/wsjump.toml", "root_dir = \"/\"\n");
-        assert_eq!(select_config_dir(&[bin.clone(), real.clone()]).unwrap(), bin);
+        assert_eq!(
+            select_config_dir(&[bin.clone(), real.clone()]).unwrap(),
+            bin
+        );
 
         tree.write("target/release/wsjump.toml", "root_dir = \"/\"\n");
-        assert_eq!(select_config_dir(&[bin.clone(), real.clone()]).unwrap(), bin);
+        assert_eq!(
+            select_config_dir(&[bin.clone(), real.clone()]).unwrap(),
+            bin
+        );
 
         assert!(select_config_dir(&[tree.root.join("nowhere")]).is_err());
     }
