@@ -2,7 +2,7 @@
 
 wsjump 管理一批小工作区：工作区可以平铺在 `w/` 下，也可以按分类放在 `c/` 下。目录结构直接服务于文件管理器和保存对话框，wsjump 提供名称、标签检索和终端跳转。
 
-详细设计见同级文档目录中的 [v3 设计文档](../doc/20261103-v3-design.md)。
+Windows（PowerShell）和 Linux（bash）都是受支持的平台。两边的差异集中在**配置定位**和 **shell 集成**两处，结论列在「平台差异」一节，判定细节写在对应模块的注释里（`crates/wsjump-core/src/config.rs`、`crates/wsjump-core/src/workspace.rs`）。
 
 ## 目录约定
 
@@ -24,8 +24,8 @@ G:/ws/
 - 分类标签从祖先目录继承：`my-plugin` 的分类标签是 `ai`、`opencode`，`demo` 的分类标签是 `ai`。
 - 找到工作区后不再递归，工作区内部的 `_cache` 等目录不会参与分类。
 - `c/` 下也可以直接放工作区，此时没有继承标签。`w/` 下的 `_` 没有分类含义。
-- 工作区名称非空、不含空白字符，必须是单个普通目录名。分类标签也必须非空、不含空白字符，`_` 和 `_two words` 不是合法分类。
-- 文件忽略，目录符号链接不作为扫描入口；不合法目录会告警并跳过其子树。
+- 工作区名称和分类标签必须是「Windows 与 POSIX 都能接受」的单个目录名：非空、不含空白字符，不含 `<` `>` `:` `"` `|` `?` `*` 和控制字符，不以 `.` 结尾，也不是 `CON` / `NUL` / `COM1` 这类 Windows 保留设备名。`_`、`_two words`、`a:b`、`a.`、`CON` 都不是合法名字。规则对两个平台完全一致，所以同一份目录可以直接在两边使用。
+- 文件忽略，目录符号链接不作为扫描入口；不合法目录会告警并跳过其子树。容器 `w`、`c` 自身也必须是真目录（Windows 的 junction 同样按链接处理）。
 - 根目录必须存在。`w`、`c` 可以暂不存在，创建工作区时会自动建立相应容器。
 
 工作区使用根目录相对路径作为唯一键，例如 `c/_ai/demo` 和 `c/_nvim/demo` 可以同名。路径预期基本冻结；移动或重命名工作区、修改祖先分类名称，会被视为旧工作区删除、新工作区出现，访问记录不自动跟随。
@@ -54,6 +54,8 @@ root_dir = "G:/ws"
 
 `root_dir` 必须是绝对路径。配置不接受未知项；旧的 `workspaces_dir`、`utc_offset_hours` 和 `id` 排序不再支持。
 
+配置和默认的 `wsjump.db` 都放在**安装目录**里，即 `wsjump.toml` 所在目录。Windows 下安装目录就是可执行文件所在目录；Linux 下程序会依次尝试「`argv[0]` 的目录 → `PATH` 里那些 `wsjump` / `wsjump-tui` 解析回本程序的目录 → 真实二进制所在目录」。因此在 `~/bin` 里放两个指向 `target/release/` 的符号链接、再把 `wsjump.toml` 放在 `~/bin`，同样能正常找到配置。判定细节见 `crates/wsjump-core/src/config.rs` 的 `install_dir` 注释。
+
 ### PowerShell 集成
 
 在 PowerShell profile 中加入：
@@ -74,6 +76,28 @@ ju --help                       # 查看 shell 集成帮助
 ```
 
 `new`、`touch`、`sync` 也可缩写为 `n`、`t`、`s`。集成会把程序返回的绝对路径交给 `Set-Location`。程序的 UI、告警、同步进度写入 stderr，stdout 留给路径结果。
+
+### Linux（bash）集成
+
+把 `wsjump`、`wsjump-tui` 和 `wsjump.toml` 放进一个已在 `PATH` 里的目录（例如 `~/bin`），再把集成片段加进 `~/.bashrc`：
+
+```bash
+eval "$(wsjump-tui init bash)"
+```
+
+`init` 不带参数时输出 PowerShell 片段，Linux 上必须显式写 `bash`。重开终端（或 `source ~/.bashrc`）后 `ju` 的用法与上面一致，选中的路径交给 `cd`。升级程序后重新执行上面这一行（或重新 `source`）即可让函数保持同步；卸载就是从 `~/.bashrc` 里删掉它。
+
+### 平台差异
+
+| 关注点 | Windows | Linux |
+|---|---|---|
+| 配置 / 数据库位置 | 可执行文件所在目录 | `argv[0]` 目录 → `PATH` 里解析回本程序的目录 → 真实二进制目录 |
+| shell 集成 | `wsjump-tui init`（默认即 PowerShell） | `wsjump-tui init bash`，写进 `~/.bashrc` |
+| 路径输出 | 平台原生 `\` 分隔符 | 平台原生 `/` 分隔符 |
+| 目录链接 | junction / symlink 不作为工作区入口 | symlink 不作为工作区入口 |
+| 工作区名称规则 | 同一套（取两平台公共子集） | 同一套 |
+
+其余的目录规则、检索、索引和数据库行为在两个平台上完全一致。`current_exe()` 在两平台的语义差异、路径中不存在中间段时的词法折叠等细节，都写在 `crates/wsjump-core/src/config.rs` 和 `crates/wsjump-core/src/workspace.rs` 的注释里。
 
 ### 从旧版升级
 
@@ -162,7 +186,7 @@ SQLite 保存元信息缓存和最近访问时间，每个进程启动时自动�
 ```text
 crates/wsjump-core/   共享目录规则、发现、元信息、索引和创建逻辑
 crates/wsjump-cli/    非交互命令，产物 wsjump
-crates/wsjump-tui/    交互选择器及 PowerShell 集成，产物 wsjump-tui
+crates/wsjump-tui/    交互选择器及 shell 集成（PowerShell / bash），产物 wsjump-tui
 ```
 
 ```powershell
@@ -172,4 +196,4 @@ cargo test --workspace
 cargo build --release
 ```
 
-测试覆盖分类继承、工作区边界、创建和冲突、路径归属、增量同步、分类移动、访问记录、数据库降级、Unicode 检索一致性和同名工作区分页。当前主要平台是 Windows / PowerShell。
+测试覆盖分类继承、工作区边界、创建和冲突、路径归属、增量同步、分类移动、访问记录、数据库降级、Unicode 检索一致性和同名工作区分页。Windows（MSVC）与 Linux（GNU）都是受支持的平台：平台相关逻辑用 `#[cfg(unix)]` / `#[cfg(windows)]` 分开实现，符号链接部署的配置定位、路径折叠和名称规则各有对应测试。改动平台相关代码时请两个平台都跑一遍上面的 `clippy` 与 `test`。

@@ -1,6 +1,7 @@
 //! Workspace identity, tags, ordering and path ownership.
 
 use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -68,18 +69,52 @@ pub fn all_tags(workspaces: &[Workspace], order: SortOrder) -> Vec<String> {
     }
 }
 
-/// Whether a name is one nonempty directory component without whitespace.
+/// Whether a name is one directory component that stays portable.
+///
+/// The rule is the *intersection* of what Windows and POSIX accept, so a tree
+/// created on one platform can be carried to the other without the directory
+/// silently disappearing or failing to copy:
+///
+/// - nonempty, not `.`/`..`, and free of whitespace, `/` and `\`: a name is a
+///   single component and must never rewrite the key it is part of;
+/// - no `<` `>` `:` `"` `|` `?` `*` and no control characters: rejected by NTFS;
+/// - no trailing `.`: Win32 strips it, so `a.` would come back as `a`;
+/// - no Windows device name (`CON`, `NUL`, `COM1`…), with or without an
+///   extension: those cannot be created on Windows at all.
+///
+/// The `components()` check is a backstop for anything the character rules miss
+/// -- on Windows a name like `a:b` parses as a drive prefix rather than one
+/// ordinary component.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
-        && !name
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '/' | '\\'))
+        && !name.ends_with('.')
+        && !name.chars().any(|ch| {
+            ch.is_whitespace()
+                || ch.is_control()
+                || matches!(ch, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
+        })
+        && !is_windows_device_name(name)
         && matches!(
             Path::new(name).components().next(),
             Some(Component::Normal(_))
         )
+}
+
+/// Whether `name` is a Windows reserved device name, ignoring any extension.
+///
+/// `con`, `Con.txt` and `NUL` are all unusable as directory names on Windows,
+/// while nothing stops them from existing on POSIX.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let numbered = stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    numbered
 }
 
 /// Extract one category tag, removing exactly one leading underscore.
@@ -163,14 +198,62 @@ fn key_under(root: &Path, target: &Path) -> Option<String> {
 }
 
 /// Canonicalize a path with a useful runtime error on failure.
+///
+/// The platforms disagree on what "resolving" a path means. Windows folds `.`
+/// and `..` lexically while looking the path up, so `ws/./gone/..` resolves as
+/// long as `ws` exists. POSIX resolves one component at a time, so the same
+/// spelling fails with ENOENT purely because `gone` is absent -- even though
+/// the path *names* an existing directory.
+///
+/// When `canonicalize` fails, the missing tail is therefore folded lexically
+/// onto the deepest ancestor that does resolve, and the folded result must
+/// itself canonicalize: a path that really is missing still errors instead of
+/// being silently invented.
 fn canonical(path: &Path) -> AppResult<PathBuf> {
-    path.canonicalize().map_err(|error| {
-        AppError::runtime(format!(
-            "cannot resolve path '{}': {}",
-            path.display(),
-            error
-        ))
-    })
+    if let Ok(real) = path.canonicalize() {
+        return Ok(real);
+    }
+
+    // Peel components until one resolves, keeping the peeled tail so it can be
+    // re-attached in order.
+    let mut tail: Vec<&OsStr> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if let Ok(real) = ancestor.canonicalize() {
+            let mut folded = real;
+            for &seg in tail.iter().rev() {
+                if seg == OsStr::new("..") {
+                    folded.pop();
+                } else if seg != OsStr::new(".") {
+                    folded.push(seg);
+                }
+            }
+            return folded.canonicalize().map_err(|error| {
+                AppError::runtime(format!(
+                    "cannot resolve path '{}': {}",
+                    path.display(),
+                    error
+                ))
+            });
+        }
+        match (ancestor.file_name(), ancestor.parent()) {
+            (Some(seg), Some(parent)) => {
+                tail.push(seg);
+                ancestor = parent;
+            }
+            // A trailing `..` has no file name; peel it explicitly.
+            (None, Some(parent)) if ancestor.ends_with("..") => {
+                tail.push(OsStr::new(".."));
+                ancestor = parent;
+            }
+            _ => break,
+        }
+    }
+
+    Err(AppError::runtime(format!(
+        "cannot resolve path '{}': no existing ancestor",
+        path.display()
+    )))
 }
 
 /// Convert a filesystem timestamp to Unix seconds, including pre-epoch times.
@@ -202,16 +285,49 @@ mod tests {
 
     #[test]
     fn names_and_categories_follow_the_same_rules() {
-        for name in ["demo", "20260730-wsjump", "工作区", "_private"] {
-            assert!(valid_name(name));
+        for name in [
+            "demo",
+            "20260730-wsjump",
+            "工作区",
+            "_private",
+            "a.b",
+            "COM",
+            "cmd1",
+        ] {
+            assert!(valid_name(name), "{name} should be a valid name");
         }
-        for name in ["", ".", "..", "two words", "a/b", "a\\b", "a\tb"] {
-            assert!(!valid_name(name));
+        for name in [
+            "",
+            ".",
+            "..",
+            "two words",
+            "a/b",
+            "a\\b",
+            "a\tb",
+            // Not portable to Windows, so not accepted on either platform.
+            "a:b",
+            "a?b",
+            "a*b",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a\u{0}b",
+            "a.",
+            "CON",
+            "nul",
+            "con.txt",
+            "COM1",
+            "LPT9",
+        ] {
+            assert!(!valid_name(name), "{name} should be rejected");
         }
         assert_eq!(category_tag("_ai"), Some("ai"));
         assert_eq!(category_tag("__ai"), Some("_ai"));
         assert_eq!(category_tag("_"), None);
         assert_eq!(category_tag("_two words"), None);
+        assert_eq!(category_tag("_a."), None);
+        assert_eq!(category_tag("_CON"), None);
     }
 
     #[test]
@@ -257,6 +373,28 @@ mod tests {
             key_for_possibly_missing_path(&tree.root, &nested).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn spellings_through_missing_segments_still_resolve_on_posix() {
+        // `w/gone/../scratch` names an existing directory, but POSIX path
+        // resolution fails on `gone` before it ever folds the `..`. The fold in
+        // `canonical` recovers the intended path; a genuinely missing one must
+        // still error rather than be invented.
+        let tree = TempTree::new("fold");
+        tree.dir("w/scratch");
+        let spelled = tree.root.join("w/gone/../scratch");
+        assert_eq!(
+            key_for_path(&tree.root, &spelled).unwrap().as_deref(),
+            Some("w/scratch")
+        );
+        tree.dir("w/scratch/inner");
+        let deeper = tree.root.join("w/gone/../scratch/./inner/../");
+        assert_eq!(
+            key_for_path(&tree.root, &deeper).unwrap().as_deref(),
+            Some("w/scratch")
+        );
+        assert!(key_for_path(&tree.root, &tree.root.join("w/gone")).is_err());
     }
 
     #[test]
