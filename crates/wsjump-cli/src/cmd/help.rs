@@ -25,16 +25,13 @@ OPTIONS:
     --                End of options; later dashed arguments are query tokens.
 
 JSON:
-    'top --json' and 'ls --json' print an array of workspace objects:
+    'ls --json' / 'top --json'   array of workspace objects:
         {"key":"c/_ai/demo","name":"demo","path":"/ws/c/_ai/demo",
          "tags":["ai","tool"],"desc":"one line","last_access":1700000000}
-    'key' is the root-relative identity, 'last_access' is Unix seconds and is
-    null when the index database is unavailable. 'top' prints at most one row.
-
-    'tags --json' prints the tag set and the category tree:
+    'tags --json'                tag set plus the category tree:
         {"tags":["ai","tool"],"categories":[["_ai",[["_opencode",[]]]]]}
-    Each category is a [name, children] pair; names keep their leading
-    underscore. Categories are ordered by name; tags follow --sort.
+
+    README.md documents each field and the ordering rules.
 
 QUERY:
     A query is a list of space-separated tokens combined with AND.
