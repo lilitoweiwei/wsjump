@@ -1,11 +1,13 @@
 //! wsjump-core: all business logic shared by the CLI and TUI front-ends.
 
+pub mod categories;
 pub mod config;
 pub mod create;
 pub mod db;
 pub mod error;
 pub mod filter;
 pub mod index;
+pub mod json;
 pub mod meta;
 pub mod progress;
 pub mod query;

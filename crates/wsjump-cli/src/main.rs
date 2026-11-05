@@ -39,6 +39,6 @@ fn run(args: &[String]) -> AppResult<()> {
         }
         Command::Touch(path) => cmd::touch::run(&Config::load()?, path.as_ref()),
         Command::Sync(path) => cmd::sync::run(&Config::load()?, path.as_ref()),
-        Command::Tags(sort) => cmd::tags::run(&Config::load()?, sort),
+        Command::Tags { sort, json } => cmd::tags::run(&Config::load()?, sort, json),
     }
 }

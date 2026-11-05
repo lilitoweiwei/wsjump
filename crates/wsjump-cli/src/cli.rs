@@ -19,8 +19,12 @@ pub enum Command {
     Touch(Option<String>),
     /// `sync [<path>]`; no path means the whole directory.
     Sync(Option<String>),
-    /// `tags [--sort=<order>]`; no sort means the configured default.
-    Tags(Option<SortOrder>),
+    /// `tags [--sort=<order>] [--json]`; no sort means the configured default.
+    Tags {
+        sort: Option<SortOrder>,
+        /// Emit one JSON document instead of the space-separated line.
+        json: bool,
+    },
     /// `help` or no arguments at all.
     Help,
 }
@@ -32,6 +36,8 @@ pub struct Query {
     pub tokens: Vec<String>,
     /// Explicit `--sort`, or `None` to use the configured default.
     pub sort: Option<SortOrder>,
+    /// Emit one JSON array of workspace objects instead of one path per line.
+    pub json: bool,
 }
 
 /// Parse process arguments (excluding argv[0]) into a `Command`.
@@ -62,6 +68,7 @@ pub fn parse(args: &[String]) -> AppResult<Command> {
 fn parse_query(args: &[String]) -> AppResult<Query> {
     let mut tokens = Vec::new();
     let mut sort = None;
+    let mut json = false;
     let mut options_done = false;
 
     let mut iter = args.iter();
@@ -72,6 +79,9 @@ fn parse_query(args: &[String]) -> AppResult<Query> {
         }
         match arg.as_str() {
             "--" => options_done = true,
+            // Machine-readable output is one flag on the existing query
+            // commands; the default output stays one path per line.
+            "--json" => json = true,
             // Accept both `--sort=x` and `--sort x`, since both spellings are
             // habitual and silently ignoring one would be surprising.
             _ if arg.starts_with("--sort=") => {
@@ -93,7 +103,7 @@ fn parse_query(args: &[String]) -> AppResult<Query> {
         }
     }
 
-    Ok(Query { tokens, sort })
+    Ok(Query { tokens, sort, json })
 }
 
 /// Parse a `--sort` value.
@@ -146,12 +156,14 @@ fn parse_sync(args: &[String]) -> AppResult<Command> {
     }
 }
 
-/// Parse `tags [--sort=<order>]`, which takes no positional arguments.
+/// Parse `tags [--sort=<order>] [--json]`, which takes no positional arguments.
 fn parse_tags(args: &[String]) -> AppResult<Command> {
     let mut sort = None;
+    let mut json = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--json" => json = true,
             _ if arg.starts_with("--sort=") => {
                 let value = arg.trim_start_matches("--sort=");
                 sort = Some(parse_sort(value)?);
@@ -170,7 +182,7 @@ fn parse_tags(args: &[String]) -> AppResult<Command> {
             }
         }
     }
-    Ok(Command::Tags(sort))
+    Ok(Command::Tags { sort, json })
 }
 
 #[cfg(test)]
@@ -341,17 +353,58 @@ mod tests {
 
     #[test]
     fn tags_without_arguments_uses_the_default_order() {
-        assert!(matches!(
-            parse_args(&["tags"]).unwrap(),
-            Command::Tags(None)
-        ));
+        match parse_args(&["tags"]).unwrap() {
+            Command::Tags {
+                sort: None,
+                json: false,
+            } => {}
+            _ => panic!("expected tags with the default order and text output"),
+        }
     }
 
     #[test]
     fn tags_accepts_a_sort_order() {
         match parse_args(&["tags", "--sort", "name"]).unwrap() {
-            Command::Tags(Some(SortOrder::Name)) => {}
+            Command::Tags {
+                sort: Some(SortOrder::Name),
+                json: false,
+            } => {}
             _ => panic!("expected tags with name sort"),
+        }
+    }
+
+    #[test]
+    fn tags_accepts_json_alone_and_with_a_sort_order() {
+        assert!(matches!(
+            parse_args(&["tags", "--json"]).unwrap(),
+            Command::Tags { json: true, .. }
+        ));
+        match parse_args(&["tags", "--json", "--sort=recency"]).unwrap() {
+            Command::Tags {
+                sort: Some(SortOrder::Recency),
+                json: true,
+            } => {}
+            _ => panic!("expected tags with recency sort and json output"),
+        }
+    }
+
+    #[test]
+    fn query_commands_accept_json_without_consuming_tokens() {
+        let query = ls_query(&["ls", "--json", "alpha", "--sort=name"]);
+        assert!(query.json);
+        assert_eq!(query.tokens, vec!["alpha".to_string()]);
+        assert_eq!(query.sort, Some(SortOrder::Name));
+        // `--` still ends option parsing, so a token may look like the flag.
+        let query = ls_query(&["ls", "--", "--json"]);
+        assert!(!query.json);
+        assert_eq!(query.tokens, vec!["--json".to_string()]);
+    }
+
+    #[test]
+    fn top_accepts_json_too() {
+        match parse_args(&["top", "--json"]).unwrap() {
+            Command::Top(query) => assert!(query.json),
+            _ => panic!("expected top"),
         }
     }
 

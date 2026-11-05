@@ -126,9 +126,9 @@ OpenCode 插件开发
 
 ```text
 wsjump new <名称> [分类路径]
-wsjump ls [--sort=name|recency] [查询...]
-wsjump top [--sort=name|recency] [查询...]
-wsjump tags [--sort=name|recency]
+wsjump ls [--sort=name|recency] [--json] [查询...]
+wsjump top [--sort=name|recency] [--json] [查询...]
+wsjump tags [--sort=name|recency] [--json]
 wsjump touch [路径]
 wsjump sync [路径]
 wsjump help
@@ -153,6 +153,35 @@ wsjump new my-plugin _ai/_opencode
 - `ls` 输出每个匹配工作区的绝对路径；`top` 输出第一项。
 - `tags` 输出空格分隔的标签集合；名称排序下标签为字典序，最近访问排序下保留工作区访问顺序中的首次出现顺序。
 - `--sort=name` 和 `--sort name` 均可；查询名称以 `-` 开头时使用 `--` 结束选项解析。
+
+### JSON 输出
+
+`--json` 给 `ls`、`top`、`tags` 加机器可读输出，默认输出保持不变。
+
+```bash
+wsjump ls --json :ai
+```
+
+```json
+[{"key":"c/_ai/demo","name":"demo","path":"/ws/c/_ai/demo",
+  "tags":["ai","tool"],"desc":"一句话说明","last_access":1700000000}]
+```
+
+- `key` 是根目录相对路径，也是唯一键；`name` 是完整目录名；`path` 是绝对路径。
+- `tags` 是有效标签（分类标签在前、文件标签在后）；`desc` 是描述全文。
+- `last_access` 是 Unix 秒；数据库不可用（降级扫盘）时为 `null`，此时排序也退回名称。
+- 空结果输出 `[]`；`top --json` 最多输出一个元素。
+
+```bash
+wsjump tags --json
+```
+
+```json
+{"tags":["ai","opencode","tool"],"categories":[["_ai",[["_opencode",[]]]],["_life",[]]]}
+```
+
+- `tags` 的顺序与不带 `--json` 时一致，仍受 `--sort` 控制。
+- `categories` 是 `c/` 下的分类树，每一项都是 `[名称, 子分类列表]`，名称保留前导下划线；只包含 `_标签` 目录（普通目录是工作区，不进树），每一级按名称升序。`c/` 不存在时为空数组。
 
 TUI 使用同一个查询接口，候选项仅显示名称、标签、描述：
 

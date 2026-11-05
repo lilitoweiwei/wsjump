@@ -1,9 +1,10 @@
-//! `wsjump top [--sort=<order>] <query...>`: print the absolute path of the
-//! first matching workspace.
+//! `wsjump top [--sort=<order>] [--json] <query...>`: print the absolute path of
+//! the first matching workspace, or that workspace as one JSON object.
 
 use wsjump_core::config::Config;
 use wsjump_core::error::{AppError, AppResult};
 use wsjump_core::index::Index;
+use wsjump_core::json;
 use wsjump_core::query;
 
 use crate::cli::Query;
@@ -21,7 +22,11 @@ pub fn run(config: &Config, args: &Query) -> AppResult<()> {
 
     match page.workspaces.first() {
         Some(ws) => {
-            println!("{}", ws.path.display());
+            if args.json {
+                println!("{}", json::workspaces(std::slice::from_ref(ws)));
+            } else {
+                println!("{}", ws.path.display());
+            }
             Ok(())
         }
         None => Err(AppError::runtime(format!(

@@ -3,8 +3,7 @@
 use wsjump_core::error::AppResult;
 
 /// Usage text listing every subcommand with a one-line description.
-const USAGE: &str = "\
-wsjump v3 - workspace query tool
+const USAGE: &str = r#"wsjump v3 - workspace query tool
 
 USAGE:
     wsjump <command> [args...]
@@ -15,14 +14,27 @@ COMMANDS:
     new <name> [categories]    Create in w/ or c/<categories>; create missing categories.
     touch [<path>]             Record a visit to a workspace (default: current directory).
     sync [<path>]              Re-read workspace metadata (default: all workspaces).
-    tags [--sort=<order>]      Print every distinct tag, space-separated.
+    tags [options]             Print every distinct tag, space-separated.
     help                       Show this help.
 
 OPTIONS:
     --sort=<order>    Result order: 'recency' (most recently visited first) or
                        'name' (alphabetical). Defaults to the configured
                       default_sort, or recency.
+    --json            Machine-readable output (see JSON below).
     --                End of options; later dashed arguments are query tokens.
+
+JSON:
+    'top --json' and 'ls --json' print an array of workspace objects:
+        {"key":"c/_ai/demo","name":"demo","path":"/ws/c/_ai/demo",
+         "tags":["ai","tool"],"desc":"one line","last_access":1700000000}
+    'key' is the root-relative identity, 'last_access' is Unix seconds and is
+    null when the index database is unavailable. 'top' prints at most one row.
+
+    'tags --json' prints the tag set and the category tree:
+        {"tags":["ai","tool"],"categories":[["_ai",[["_opencode",[]]]]]}
+    Each category is a [name, children] pair; names keep their leading
+    underscore. Categories are ordered by name; tags follow --sort.
 
 QUERY:
     A query is a list of space-separated tokens combined with AND.
@@ -43,7 +55,7 @@ SYNC:
     The index keeps itself up to date, re-reading only metadata files whose
     size or timestamp changed, so 'sync' is rarely needed. Run it if a
     workspace's tags or description look stale despite the file being
-    correct on disk.";
+    correct on disk."#;
 
 /// Print usage to stdout and succeed.
 pub fn run() -> AppResult<()> {
